@@ -470,10 +470,8 @@
     openSheet((kind === 'sale' ? 'فاتورة بيع #' : 'فاتورة شراء #') + num(inv.no), `
       ${invoiceHTML(kind, inv)}
       <div class="btn-row">
-        <button class="btn secondary no-embed" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>
+        ${kind === 'purchase' ? `<button class="btn secondary no-embed" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>` : ''}
         <button class="btn secondary" onclick="App.invoicePDF('${kind}','${id}')">PDF</button>
-        ${kind === 'sale' && db.settings.invoiceTemplate !== false ? `<button class="btn secondary" onclick="App.invoiceImage('${id}')">صورة</button>` : ''}
-        ${(() => { const c = kind === 'sale' && byId(db.customers, inv.customerId); return c && waNumber(c.phone) ? `<a class="btn wa-btn" href="${esc(waLink(c.phone, invoiceText('sale', inv)))}" target="_blank" rel="noopener">واتساب</a>` : `<button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة نص</button>`; })()}
       </div>
       ${(() => { const c = kind === 'sale' && db.settings.invoiceTemplate !== false && byId(db.customers, inv.customerId); return c && waNumber(c.phone) ? `<div class="btn-row"><button class="btn wa-btn" onclick="App.waImage('${id}')">إرسال صورة الفاتورة على واتساب ${esc(c.name)}</button></div>` : ''; })()}
       <div class="btn-row"><button class="btn danger" onclick="App.deleteInvoice('${kind}','${id}')">حذف الفاتورة</button></div>
