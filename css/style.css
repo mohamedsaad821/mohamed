@@ -254,6 +254,24 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .dlg-box { background: var(--card); color: var(--text); border-radius: 16px; padding: 18px; width: 100%; max-width: 380px; display: grid; gap: 12px; }
 .dlg-msg { font-weight: 600; line-height: 1.7; }
 .dlg-box textarea { font-size: 12px; direction: ltr; }
+.pdf-doc {
+  --bg: #f4f4f5; --card: #ffffff; --text: #111827; --muted: #4b5563; --line: #d1d5db;
+  --primary: #0f766e; --primary-soft: #ccfbf1; --green: #15803d; --green-soft: #dcfce7;
+  --red: #b91c1c; --red-soft: #fee2e2; --amber: #b45309; --amber-soft: #fef3c7; --blue: #1d4ed8; --blue-soft: #dbeafe;
+  position: absolute; left: -10000px; top: 0; width: 794px; padding: 28px 30px;
+  background: #ffffff; color: var(--text); font-size: 14px; line-height: 1.6;
+}
+.pdf-doc .card, .pdf-doc .stat, .pdf-doc .list, .pdf-doc .table-wrap { border: 1px solid var(--line); background: #fff; }
+.pdf-doc .table-wrap { overflow: visible; }
+.pdf-doc th { background: #f3f4f6; }
+.pdf-doc th, .pdf-doc td { white-space: normal; }
+.pdf-doc .stats { grid-template-columns: repeat(3, 1fr); }
+.pdf-doc .stat.wide { grid-column: span 3; }
+.pdf-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; border-bottom: 3px solid var(--primary); padding-bottom: 12px; margin-bottom: 16px; }
+.pdf-shop { font-size: 24px; font-weight: 800; color: var(--primary); }
+.pdf-meta { text-align: left; }
+.pdf-title { font-size: 18px; font-weight: 800; }
+.pdf-foot { margin-top: 18px; padding-top: 8px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {

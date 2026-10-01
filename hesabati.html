@@ -267,6 +267,24 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .dlg-box { background: var(--card); color: var(--text); border-radius: 16px; padding: 18px; width: 100%; max-width: 380px; display: grid; gap: 12px; }
 .dlg-msg { font-weight: 600; line-height: 1.7; }
 .dlg-box textarea { font-size: 12px; direction: ltr; }
+.pdf-doc {
+  --bg: #f4f4f5; --card: #ffffff; --text: #111827; --muted: #4b5563; --line: #d1d5db;
+  --primary: #0f766e; --primary-soft: #ccfbf1; --green: #15803d; --green-soft: #dcfce7;
+  --red: #b91c1c; --red-soft: #fee2e2; --amber: #b45309; --amber-soft: #fef3c7; --blue: #1d4ed8; --blue-soft: #dbeafe;
+  position: absolute; left: -10000px; top: 0; width: 794px; padding: 28px 30px;
+  background: #ffffff; color: var(--text); font-size: 14px; line-height: 1.6;
+}
+.pdf-doc .card, .pdf-doc .stat, .pdf-doc .list, .pdf-doc .table-wrap { border: 1px solid var(--line); background: #fff; }
+.pdf-doc .table-wrap { overflow: visible; }
+.pdf-doc th { background: #f3f4f6; }
+.pdf-doc th, .pdf-doc td { white-space: normal; }
+.pdf-doc .stats { grid-template-columns: repeat(3, 1fr); }
+.pdf-doc .stat.wide { grid-column: span 3; }
+.pdf-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; border-bottom: 3px solid var(--primary); padding-bottom: 12px; margin-bottom: 16px; }
+.pdf-shop { font-size: 24px; font-weight: 800; color: var(--primary); }
+.pdf-meta { text-align: left; }
+.pdf-title { font-size: 18px; font-weight: 800; }
+.pdf-foot { margin-top: 18px; padding-top: 8px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {
@@ -757,11 +775,93 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       ${invoiceHTML(kind, inv)}
       <div class="btn-row">
         <button class="btn secondary no-embed" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>
-        <button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة</button>
+        <button class="btn secondary" onclick="App.invoicePDF('${kind}','${id}')">PDF</button>
+        <button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة نص</button>
       </div>
       <div class="btn-row"><button class="btn danger" onclick="App.deleteInvoice('${kind}','${id}')">حذف الفاتورة</button></div>
     `);
   }
+  /* ---------- PDF ---------- */
+  const H2C = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+  const JSPDF = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+  let libsP = null;
+  function loadScript(src) {
+    return new Promise((res, rej) => { const el = document.createElement('script'); el.src = src; el.onload = res; el.onerror = () => rej(new Error('load ' + src)); document.head.appendChild(el); });
+  }
+  function loadPdfLibs() {
+    if (!libsP) libsP = Promise.all([loadScript(H2C), loadScript(JSPDF)]).catch(e => { libsP = null; throw e; });
+    return libsP;
+  }
+  let pdfBusy = false;
+  async function makePDF(title, html, filename) {
+    if (pdfBusy) return;
+    pdfBusy = true;
+    toast('جاري تجهيز ملف PDF…');
+    try {
+      try { await loadPdfLibs(); }
+      catch (e) { return ask('تعذر تجهيز ملف PDF. تأكد من اتصال الإنترنت وحاول مرة أخرى.', { cancel: false }); }
+      const box = document.createElement('div');
+      box.className = 'pdf-doc'; box.dir = 'rtl';
+      box.innerHTML = `<div class="pdf-head"><div><div class="pdf-shop">${esc(db.settings.shopName)}</div>
+          ${db.settings.shopPhone ? `<div>${esc(digits(db.settings.shopPhone))}</div>` : ''}</div>
+          <div class="pdf-meta"><div class="pdf-title">${esc(title)}</div><div>تاريخ الإصدار: ${fmtDate(today())}</div></div></div>
+        ${html}<div class="pdf-foot">صدر من برنامج حساباتي</div>`;
+      document.body.appendChild(box);
+      let blob;
+      try {
+        const scale = 2;
+        const top0 = box.getBoundingClientRect().top;
+        // مواضع القطع المسموحة بين الصفوف حتى لا ينقسم سطر بين صفحتين
+        const breaks = Array.from(box.querySelectorAll('tr, .kv, .row, .stat, .card, .section-title, .pdf-head, .table-wrap, .line'))
+          .map(el => Math.round((el.getBoundingClientRect().bottom - top0) * scale)).sort((a, b) => a - b);
+        const canvas = await window.html2canvas(box, { scale, backgroundColor: '#ffffff', logging: false });
+        const pdf = new window.jspdf.jsPDF({ unit: 'pt', format: 'a4' });
+        const pw = pdf.internal.pageSize.getWidth(), ph = pdf.internal.pageSize.getHeight(), m = 22;
+        const iw = pw - 2 * m, ratio = iw / canvas.width;
+        const pageH = Math.floor((ph - 2 * m) / ratio);
+        let y = 0, first = true;
+        while (y < canvas.height - 2) {
+          let end = Math.min(canvas.height, y + pageH);
+          if (end < canvas.height) {
+            const cand = breaks.filter(b => b > y + pageH * 0.5 && b <= end);
+            if (cand.length) end = cand[cand.length - 1];
+          }
+          const part = document.createElement('canvas');
+          part.width = canvas.width; part.height = end - y;
+          const ctx = part.getContext('2d');
+          ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, part.width, part.height);
+          ctx.drawImage(canvas, 0, y, canvas.width, end - y, 0, 0, canvas.width, end - y);
+          if (!first) pdf.addPage();
+          pdf.addImage(part.toDataURL('image/jpeg', 0.92), 'JPEG', m, m, iw, (end - y) * ratio);
+          first = false; y = end;
+        }
+        blob = pdf.output('blob');
+      } finally { box.remove(); }
+      await deliverFile(blob, filename, title);
+    } catch (e) {
+      console.error(e);
+      ask('حدث خطأ أثناء تجهيز ملف PDF. حاول مرة أخرى.', { cancel: false });
+    } finally { pdfBusy = false; }
+  }
+  async function deliverFile(blob, filename, title) {
+    if (EMBED) {
+      const dl = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
+      if (!dl) return ask('حفظ الملفات غير متاح في هذه الصفحة.', { cancel: false });
+      try { await dl.save({ filename, data: blob }); toast('تم'); }
+      catch (e) { if (e && e.code !== 'declined') ask('تعذر حفظ الملف. حاول مرة أخرى بعد قليل.', { cancel: false }); }
+      return;
+    }
+    const file = new File([blob], filename, { type: blob.type || 'application/octet-stream' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title }); return; }
+      catch (e) { if (e.name === 'AbortError') return; }
+    }
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(file); a.download = filename; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    toast('تم تنزيل الملف');
+  }
+
   function printHTML(html) {
     $('#printArea').innerHTML = html;
     setTimeout(() => window.print(), 50);
@@ -1243,6 +1343,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const p = byId(db.payrolls, id); if (!p) return;
     openSheet('قسيمة الراتب', `${payslipHTML(p)}
       <div class="btn-row"><button class="btn secondary no-embed" onclick="App.printPayslip('${id}')">طباعة</button>
+      <button class="btn secondary" onclick="App.payslipPDF('${id}')">PDF</button>
       <button class="btn danger" onclick="App.deletePayroll('${id}')">إلغاء الصرف</button></div>`);
   }
   async function deletePayroll(id) {
@@ -1262,7 +1363,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     return [rp.from || today(), rp.to || today()];
   }
   function reports() {
-    setTop('التقارير', `<button class="link-btn no-embed" onclick="App.printReport()">طباعة</button>`);
+    setTop('التقارير', `<button class="link-btn" onclick="App.reportPDF()">PDF</button>`);
     if (!rp.from) { rp.from = thisMonth() + '-01'; rp.to = today(); }
     const presets = [['today', 'اليوم'], ['week', 'آخر ٧ أيام'], ['month', 'هذا الشهر'], ['last', 'الشهر الماضي'], ['year', 'هذه السنة'], ['custom', 'فترة محددة']];
     const tabs = [['profit', 'الأرباح'], ['sales', 'المبيعات'], ['expenses', 'المصاريف'], ['customers', 'العملاء'], ['stock', 'المخزن'], ['salaries', 'الرواتب']];
@@ -1272,6 +1373,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <label class="field"><span>إلى</span><input type="date" class="input" value="${rp.to}" onchange="App.rpSet('to',this.value)"></label></div>` : ''}
       <div class="seg">${tabs.map(([k, l]) => `<button class="${rp.tab === k ? 'on' : ''}" onclick="App.rpSet('tab','${k}')">${l}</button>`).join('')}</div>
       <div id="reportBody">${reportBody()}</div>
+      <div class="btn-row">
+        <button class="btn" onclick="App.reportPDF()">حفظ ومشاركة التقرير PDF</button>
+        <button class="btn secondary no-embed" style="flex:0 0 auto" onclick="App.printReport()">طباعة</button>
+      </div>
     `);
   }
   function reportBody() {
@@ -1410,9 +1515,14 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     }
     return '';
   }
+  const REPORT_NAMES = { profit: 'تقرير الأرباح', sales: 'تقرير المبيعات', expenses: 'تقرير المصاريف', customers: 'تقرير العملاء', stock: 'تقرير المخزن', salaries: 'تقرير الرواتب' };
   function printReport() {
-    const tabName = { profit: 'تقرير الأرباح', sales: 'تقرير المبيعات', expenses: 'تقرير المصاريف', customers: 'تقرير العملاء', stock: 'تقرير المخزن', salaries: 'تقرير الرواتب' }[rp.tab];
-    printHTML(`<h2>${esc(db.settings.shopName)} — ${tabName}</h2>` + $('#reportBody').innerHTML);
+    printHTML(`<h2>${esc(db.settings.shopName)} — ${REPORT_NAMES[rp.tab]}</h2>` + $('#reportBody').innerHTML);
+  }
+  function reportPDF() {
+    const [from, to] = rpRange();
+    const name = REPORT_NAMES[rp.tab];
+    makePDF(name, reportBody(), name.replace(/ /g, '-') + '-' + from + '_' + (to > today() ? today() : to) + '.pdf');
   }
 
   /* ---------- More & Settings ---------- */
@@ -1478,6 +1588,11 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     db.settings.lastBackup = new Date().toISOString(); save();
     const json = JSON.stringify(db, null, 1);
     if (EMBED) {
+      const dl = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
+      if (dl) {
+        try { await dl.save({ filename: 'hesabati-backup-' + today() + '.json', data: json }); toast('تم'); render(); return; }
+        catch (e) { if (e && e.code === 'declined') return; }
+      }
       await ask('انسخ هذا النص واحفظه في «الملاحظات» أو أرسله لنفسك. لاسترجاعه اضغط «استرجاع من نص» والصق النص.', { cancel: false, text: json });
       render(); return;
     }
@@ -1557,7 +1672,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     expenseForm, saveExpense, deleteExpense,
     employeeForm, saveEmployee, deleteEmployee, showEmployee, advanceForm, saveAdvance, deleteAdvance,
     payrollForm, prCalc, savePayroll, payAll, showPayslip, deletePayroll,
-    printReport, saveSettings, exportData, importData, importText, resetAll, loadDemo, picker,
+    printReport, reportPDF, saveSettings, exportData, importData, importText, resetAll, loadDemo, picker,
     newInvoice(kind) { ed = newEd(kind); if (location.hash === '#' + kind + '-new') render(); else go(kind + '-new'); },
     edType(t) { ed.type = t; if (t === 'cash') ed.paid = 0; render(); },
     edField(k, v) { ed[k] = v; if (k === 'discount' || k === 'paid') edRefresh(false); },
@@ -1570,6 +1685,15 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     pickSearch(q) { $('#pickList').innerHTML = pickerDraw(q); },
     printInvoice(kind, id) { printHTML(invoiceHTML(kind, byId(kind === 'sale' ? db.sales : db.purchases, id))); },
     shareInvoice(kind, id) { shareText(invoiceText(kind, byId(kind === 'sale' ? db.sales : db.purchases, id)), 'فاتورة'); },
+    invoicePDF(kind, id) {
+      const inv = byId(kind === 'sale' ? db.sales : db.purchases, id); if (!inv) return;
+      makePDF((kind === 'sale' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + inv.no, invoiceHTML(kind, inv), (kind === 'sale' ? 'فاتورة-' : 'شراء-') + inv.no + '.pdf');
+    },
+    payslipPDF(id) {
+      const p = byId(db.payrolls, id); if (!p) return;
+      const e = byId(db.employees, p.employeeId);
+      makePDF('قسيمة راتب', payslipHTML(p), 'راتب-' + (e ? e.name.replace(/ /g, '-') : '') + '-' + p.month + '.pdf');
+    },
     printPayslip(id) { printHTML(payslipHTML(byId(db.payrolls, id))); },
     setSalesFilter(f) { salesFilter = f; render(); },
     salesSearch(q) { salesQuery = q; const pos = q.length; render(); const el = document.querySelector('.search input'); if (el) { el.focus(); el.setSelectionRange(pos, pos); } },
