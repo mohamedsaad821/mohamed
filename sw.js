@@ -1,7 +1,7 @@
 // يجعل البرنامج يعمل بدون إنترنت بعد أول فتح
-const CACHE = 'hesabati-v3';
+const CACHE = 'hesabati-v4';
 const FILES = ['./', './index.html', './css/style.css', './js/app.js', './manifest.webmanifest',
-  './icons/icon.svg', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png'];
+  './icons/icon.svg', './icons/apple-touch-icon.png', './icons/icon-192.png', './icons/icon-512.png', './img/invoice-template.jpg'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));
 });

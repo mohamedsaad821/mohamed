@@ -272,6 +272,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .pdf-meta { text-align: left; }
 .pdf-title { font-size: 18px; font-weight: 800; }
 .pdf-foot { margin-top: 18px; padding-top: 8px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; }
+.wa-btn { background: #25d366; color: #063d1d; text-decoration: none; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {

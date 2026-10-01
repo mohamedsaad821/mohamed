@@ -10,7 +10,7 @@
   /* ---------- Data ---------- */
   function defaults() {
     return {
-      settings: { shopName: 'متجري', shopPhone: '', currency: 'د.ع', arabicDigits: false, openingCash: 0, lastBackup: '' },
+      settings: { shopName: 'متجري', shopPhone: '', currency: 'د.ع', arabicDigits: false, openingCash: 0, lastBackup: '', invoiceTemplate: true },
       products: [], customers: [], suppliers: [],
       sales: [], purchases: [], expenses: [],
       payments: [], supplierPayments: [],
@@ -76,6 +76,7 @@
       d.innerHTML = `<div class="dlg-box" role="alertdialog">
         <div class="dlg-msg">${esc(msg).replace(/\n/g, '<br>')}</div>
         ${o.input === 'area' ? '<textarea class="input" id="dlgIn" rows="6"></textarea>' : o.input ? '<input class="input" id="dlgIn">' : ''}
+        ${o.html || ''}
         ${o.text != null ? `<textarea class="input" id="dlgText" rows="7" readonly>${esc(o.text)}</textarea>
           <button class="btn secondary block" id="dlgCopy" style="margin-top:8px">نسخ النص</button>` : ''}
         <div class="btn-row">
@@ -92,6 +93,7 @@
         navigator.clipboard.writeText(o.text).then(() => toast('تم النسخ')).catch(() => { ta.focus(); ta.select(); });
       };
       const inp = $('#dlgIn'); if (inp) setTimeout(() => inp.focus(), 50);
+      d.querySelectorAll('a.dlg-close').forEach(a => a.addEventListener('click', () => setTimeout(() => done(true), 300)));
     });
   }
 
@@ -470,7 +472,7 @@
       <div class="btn-row">
         <button class="btn secondary no-embed" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>
         <button class="btn secondary" onclick="App.invoicePDF('${kind}','${id}')">PDF</button>
-        <button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة نص</button>
+        ${(() => { const c = kind === 'sale' && byId(db.customers, inv.customerId); return c && waNumber(c.phone) ? `<a class="btn wa-btn" href="${esc(waLink(c.phone, invoiceText('sale', inv)))}" target="_blank" rel="noopener">واتساب</a>` : `<button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة نص</button>`; })()}
       </div>
       <div class="btn-row"><button class="btn danger" onclick="App.deleteInvoice('${kind}','${id}')">حذف الفاتورة</button></div>
     `);
@@ -537,6 +539,148 @@
       ask('حدث خطأ أثناء تجهيز ملف PDF. حاول مرة أخرى.', { cancel: false });
     } finally { pdfBusy = false; }
   }
+  /* ---------- فاتورة البيع بتصميم المحل ---------- */
+  // مواضع الحقول على صورة التصميم (1024×1536)
+  const TPL = {
+    w: 1024, h: 1536,
+    no: [103, 424], date: [103, 459],
+    rowY0: 609, rowH: 53.6, rows: 10,
+    name: [905, 345], qty: 472, price: 313, total: 131,
+    totalBox: [165, 1190],
+    panel: [584, 1138, 406, 132]
+  };
+  const CFONT = '"SF Arabic", "Geeza Pro", -apple-system, "Segoe UI", Tahoma, Arial, sans-serif';
+  let tplP = null, jspdfP = null;
+  function loadTpl() {
+    if (!tplP) tplP = new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => { tplP = null; rej(new Error('template')); };
+      im.src = window.INVOICE_TEMPLATE || 'img/invoice-template.jpg';
+    });
+    return tplP;
+  }
+  function loadJsPDF() {
+    if (window.jspdf) return Promise.resolve();
+    if (!jspdfP) jspdfP = loadScript(JSPDF).catch(e => { jspdfP = null; throw e; });
+    return jspdfP;
+  }
+  function templatePages(inv, im) {
+    const S = 1.5;
+    const cust = byId(db.customers, inv.customerId);
+    const chunks = [];
+    for (let i = 0; i < Math.max(1, inv.items.length); i += TPL.rows) chunks.push(inv.items.slice(i, i + TPL.rows));
+    return chunks.map((items, pi) => {
+      const last = pi === chunks.length - 1;
+      const c = document.createElement('canvas');
+      c.width = TPL.w * S; c.height = TPL.h * S;
+      const x = c.getContext('2d');
+      x.scale(S, S);
+      x.drawImage(im, 0, 0, TPL.w, TPL.h);
+      x.textBaseline = 'middle'; x.direction = 'rtl';
+      const txt = (t, X, Y, o = {}) => {
+        x.font = `${o.bold ? '700' : '600'} ${o.size || 20}px ${CFONT}`;
+        x.fillStyle = o.color || '#0b2a6b';
+        x.textAlign = o.align || 'center';
+        let str = String(t);
+        if (o.max && x.measureText(str).width > o.max) {
+          while (str.length > 1 && x.measureText(str + '…').width > o.max) str = str.slice(0, -1);
+          str += '…';
+        }
+        x.fillText(str, X, Y);
+      };
+      // تغطية النقاط المطبوعة تحت الحقول
+      const cover = (cx, cy, cw, chh, fill) => {
+        x.save(); x.fillStyle = fill; x.beginPath();
+        if (x.roundRect) x.roundRect(cx, cy, cw, chh, 8); else x.rect(cx, cy, cw, chh);
+        x.fill(); x.restore();
+      };
+      cover(44, 409, 120, 30, '#f7f9fe'); cover(44, 444, 120, 30, '#f7f9fe');
+      cover(46, 1160, 238, 60, '#f6f9ff');
+      txt(num(inv.no), TPL.no[0], TPL.no[1], { bold: true, size: 20 });
+      txt(fmtDate(inv.date), TPL.date[0], TPL.date[1], { bold: true, size: 18 });
+      items.forEach((l, i) => {
+        const y = TPL.rowY0 + TPL.rowH * i;
+        txt(l.name, TPL.name[0], y, { align: 'right', max: TPL.name[1], size: 20 });
+        txt(num(l.qty), TPL.qty, y, { size: 20 });
+        txt(num(l.price), TPL.price, y, { size: 20 });
+        txt(num(l.qty * l.price), TPL.total, y, { bold: true, size: 20 });
+      });
+      if (chunks.length > 1) txt(`صفحة ${num(pi + 1)} من ${num(chunks.length)}`, 512, 1283, { size: 15, color: '#475569' });
+      if (!last) { txt('يتبع…', TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 22 }); return c; }
+      txt(money(inv.total), TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 25, color: '#0b3fa8' });
+      // لوحة المعلومات: الزبون، نوع الفاتورة، الدفعة، المتبقي
+      const rem = inv.total - inv.paid;
+      const rows = [
+        ['الزبون', cust ? cust.name : 'زبون نقدي'],
+        ['نوع الفاتورة', inv.type === 'credit' ? 'آجل' : 'نقدي'],
+        inv.discount ? ['الخصم', money(inv.discount)] : null,
+        ['الدفعة المستلمة', money(inv.paid)],
+        ['المتبقي', money(rem), rem > 0 ? '#dc2626' : '#15803d']
+      ];
+      if (cust && inv.type === 'credit') {
+        const b = customerBalance(cust.id);
+        rows.push(['رصيد الحساب', !Math.round(b) ? 'مسدد' : (b > 0 ? 'مطلوب منكم ' : 'لكم ') + money(Math.abs(b)), b > 0 ? '#dc2626' : '#15803d']);
+      }
+      const list = rows.filter(Boolean);
+      const [px, py, pw, ph] = TPL.panel;
+      x.save();
+      x.fillStyle = 'rgba(255,255,255,0.94)'; x.strokeStyle = '#1d5fd6'; x.lineWidth = 2;
+      x.beginPath();
+      if (x.roundRect) x.roundRect(px, py, pw, ph, 18); else x.rect(px, py, pw, ph);
+      x.fill(); x.stroke();
+      x.restore();
+      const rh = (ph - 12) / list.length, fs = Math.min(19, rh * 0.78);
+      list.forEach(([k, v, col], i) => {
+        const y = py + 6 + rh * (i + 0.5);
+        if (i) { x.strokeStyle = '#dbe6fb'; x.lineWidth = 1; x.beginPath(); x.moveTo(px + 14, py + 6 + rh * i); x.lineTo(px + pw - 14, py + 6 + rh * i); x.stroke(); }
+        txt(k, px + pw - 16, y, { align: 'right', size: fs, color: '#475569' });
+        txt(v, px + 16, y, { align: 'left', bold: true, size: fs, color: col || '#0b2a6b', max: pw * 0.55 });
+      });
+      return c;
+    });
+  }
+  async function saleInvoicePDF(inv) {
+    if (pdfBusy) return;
+    pdfBusy = true;
+    toast('جاري تجهيز الفاتورة…');
+    let ok = false;
+    try {
+      let im;
+      try { [, im] = await Promise.all([loadJsPDF(), loadTpl()]); }
+      catch (e) { return ask('تعذر تجهيز ملف PDF. تأكد من اتصال الإنترنت وحاول مرة أخرى.', { cancel: false }); }
+      const pages = templatePages(inv, im);
+      const W = TPL.w * 0.75, H = TPL.h * 0.75;
+      const pdf = new window.jspdf.jsPDF({ unit: 'pt', format: [W, H] });
+      pages.forEach((c, i) => { if (i) pdf.addPage([W, H]); pdf.addImage(c.toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, W, H); });
+      await deliverFile(pdf.output('blob'), 'فاتورة-' + inv.no + '.pdf', 'فاتورة #' + inv.no);
+      ok = true;
+    } catch (e) {
+      console.error(e);
+      ask('حدث خطأ أثناء تجهيز الفاتورة. حاول مرة أخرى.', { cancel: false });
+    } finally { pdfBusy = false; }
+    if (ok) offerWhatsApp(inv);
+  }
+
+  /* ---------- واتساب ---------- */
+  function waNumber(phone) {
+    let d = String(phone || '').replace(/[٠-٩]/g, ch => AR.indexOf(ch)).replace(/\D/g, '');
+    if (!d) return '';
+    if (d.startsWith('00')) d = d.slice(2);
+    if (d.startsWith('0')) d = '964' + d.slice(1);
+    else if (d.length === 10 && d[0] === '7') d = '964' + d;
+    return d.length >= 11 ? d : '';
+  }
+  const waLink = (phone, text) => 'https://wa.me/' + waNumber(phone) + '?text=' + encodeURIComponent(text);
+  function offerWhatsApp(inv) {
+    const cust = byId(db.customers, inv.customerId);
+    if (!cust || !waNumber(cust.phone)) return;
+    ask(`تم تجهيز ملف الفاتورة.\nافتح محادثة ${cust.name} على واتساب، الرسالة جاهزة وما عليك إلا تضغط «إرسال».`, {
+      cancel: false, ok: 'إغلاق',
+      html: `<a class="btn block wa-btn dlg-close" href="${esc(waLink(cust.phone, invoiceText('sale', inv)))}" target="_blank" rel="noopener">فتح واتساب ${esc(cust.name)}</a>`
+    });
+  }
+
   async function deliverFile(blob, filename, title) {
     if (EMBED) {
       const dl = window.claude && window.claude.use ? await window.claude.use('downloads') : null;
@@ -569,7 +713,7 @@
       inv.discount ? 'الخصم: ' + money(inv.discount) : '',
       'الإجمالي: ' + money(inv.total), 'المدفوع: ' + money(inv.paid),
       inv.total - inv.paid > 0 ? 'المتبقي: ' + money(inv.total - inv.paid) : '',
-      party && isSale ? 'رصيدك الكلي: ' + money(customerBalance(party.id)) : ''
+      party && isSale ? (b => 'رصيد حسابك: ' + (!Math.round(b) ? 'مسدد' : (b > 0 ? 'مطلوب منكم ' : 'لكم ') + money(Math.abs(b))))(customerBalance(party.id)) : ''
     ].filter((x, i, a) => x !== '' || (a[i - 1] !== '')).join('\n');
   }
   async function shareText(text, title) {
@@ -702,7 +846,7 @@
     const c = id ? byId(P.list(), id) : null;
     openSheet(c ? 'تعديل ' + P.one : P.one + ' جديد', `
       <label class="field"><span>الاسم *</span><input class="input" id="cName" value="${esc(c ? c.name : '')}"></label>
-      <label class="field"><span>رقم الهاتف</span><input class="input" id="cPhone" type="tel" inputmode="tel" value="${esc(c ? c.phone : '')}" placeholder="07xxxxxxxxx"></label>
+      <label class="field"><span>${kind === 'customer' ? 'رقم الواتساب' : 'رقم الهاتف'}</span><input class="input" id="cPhone" type="tel" inputmode="tel" value="${esc(c ? c.phone : '')}" placeholder="07xxxxxxxxx"></label>
       <label class="field"><span>العنوان / ملاحظات</span><input class="input" id="cNotes" value="${esc(c ? c.notes : '')}"></label>
       <div class="card">
         <div class="bold" style="margin-bottom:8px">الرصيد الافتتاحي (الحساب القديم قبل البرنامج)</div>
@@ -757,7 +901,7 @@
       ${c.phone ? `<div class="card"><div class="kv"><span class="k">الهاتف</span><a class="v" href="tel:${esc(c.phone)}">${esc(digits(c.phone))}</a></div>${c.notes ? `<div class="kv"><span class="k">ملاحظات</span><span class="v">${esc(c.notes)}</span></div>` : ''}</div>` : ''}
       <div class="btn-row">
         <button class="btn" onclick="App.paymentForm('${kind}','${id}')">${kind === 'customer' ? 'قبض دفعة' : 'تسديد دفعة'}</button>
-        <button class="btn secondary" onclick="App.shareStatement('${kind}','${id}')">إرسال كشف حساب</button>
+        ${waNumber(c.phone) ? `<a class="btn wa-btn" href="${esc(waLink(c.phone, statementText(kind, id)))}" target="_blank" rel="noopener">كشف حساب واتساب</a>` : `<button class="btn secondary" onclick="App.shareStatement('${kind}','${id}')">إرسال كشف حساب</button>`}
       </div>
       <div class="section-title">كشف الحساب</div>
       ${rows.length ? `<div class="list">${rows.map(r => r.html).join('')}</div>` : '<div class="card empty">لا توجد حركات</div>'}
@@ -767,7 +911,8 @@
       </div>
     `);
   }
-  function shareStatement(kind, id) {
+  function shareStatement(kind, id) { shareText(statementText(kind, id), 'كشف حساب'); }
+  function statementText(kind, id) {
     const P = PARTY[kind]; const c = byId(P.list(), id);
     const invs = P.invoices(id); const pays = P.pay().filter(p => p.partyId === id);
     const lines = [db.settings.shopName, 'كشف حساب: ' + c.name, 'بتاريخ ' + fmtDate(today()), ''];
@@ -775,7 +920,7 @@
     invs.slice(-15).forEach(s => lines.push(`${fmtDate(s.date)}  ${s.items.length ? 'فاتورة #' + num(s.no) : (s.note || 'رصيد سابق')}: ${money(s.total)}${s.paid ? ' (مدفوع ' + money(s.paid) + ')' : ''}`));
     pays.slice(-15).forEach(p => lines.push(`${fmtDate(p.date)}  دفعة: ${money(p.amount)}`));
     lines.push('', 'الرصيد: ' + balWord(kind, partyBalance(kind, id)));
-    shareText(lines.join('\n'), 'كشف حساب');
+    return lines.join('\n');
   }
   async function deleteParty(kind, id) {
     const P = PARTY[kind];
@@ -1272,6 +1417,7 @@
         <label class="field"><span>هاتف المحل (يظهر في الفاتورة)</span><input class="input" id="sPhone" type="tel" value="${esc(s.shopPhone)}"></label>
         <label class="field"><span>رصيد الصندوق الافتتاحي</span><input class="input money" inputmode="numeric" id="sOpen" value="${fmtIn(s.openingCash)}" placeholder="0"></label>
         <label class="field"><span>رمز العملة</span><input class="input" id="sCur" value="${esc(s.currency)}"></label>
+        <label class="field" style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="sTpl" ${s.invoiceTemplate !== false ? 'checked' : ''} style="width:22px;height:22px"><span style="margin:0">استخدام تصميم الفاتورة الخاص (SMART CARD) لفواتير البيع</span></label>
         <label class="field" style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="sDig" ${s.arabicDigits ? 'checked' : ''} style="width:22px;height:22px"><span style="margin:0">عرض الأرقام بالهندية (١٢٣)</span></label>
         <button class="btn block" onclick="App.saveSettings()">حفظ الإعدادات</button>
       </div>
@@ -1295,7 +1441,7 @@
     `);
   }
   function saveSettings() {
-    Object.assign(db.settings, { shopName: val('sName') || 'متجري', shopPhone: val('sPhone'), openingCash: Math.round(nval('sOpen')), currency: val('sCur') || 'د.ع', arabicDigits: $('#sDig').checked });
+    Object.assign(db.settings, { shopName: val('sName') || 'متجري', shopPhone: val('sPhone'), openingCash: Math.round(nval('sOpen')), currency: val('sCur') || 'د.ع', arabicDigits: $('#sDig').checked, invoiceTemplate: $('#sTpl').checked });
     save(); toast('تم الحفظ'); render();
   }
   async function exportData() {
@@ -1403,6 +1549,7 @@
     shareInvoice(kind, id) { shareText(invoiceText(kind, byId(kind === 'sale' ? db.sales : db.purchases, id)), 'فاتورة'); },
     invoicePDF(kind, id) {
       const inv = byId(kind === 'sale' ? db.sales : db.purchases, id); if (!inv) return;
+      if (kind === 'sale' && db.settings.invoiceTemplate !== false) return saleInvoicePDF(inv);
       makePDF((kind === 'sale' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + inv.no, invoiceHTML(kind, inv), (kind === 'sale' ? 'فاتورة-' : 'شراء-') + inv.no + '.pdf');
     },
     payslipPDF(id) {
