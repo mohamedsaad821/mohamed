@@ -336,6 +336,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
+  const APP_VERSION = '1.7';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -366,9 +367,15 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     return out;
   }
   let db = load();
-  function save() {
+  function saveLocal() {
     try { localStorage.setItem(KEY, JSON.stringify(db)); }
-    catch (e) { toast('تعذر حفظ البيانات! يرجى أخذ نسخة احتياطية فوراً.'); }
+    catch (e) { if (!cloud.db) toast('تعذر حفظ البيانات! يرجى أخذ نسخة احتياطية فوراً.'); }
+  }
+  // كل حفظ: على الجهاز، ثم على السحابة بعد لحظات
+  function save() {
+    db.sync = Object.assign({}, db.sync, { dirty: true });
+    saveLocal();
+    scheduleCloud();
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
@@ -413,7 +420,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         ${o.text != null ? `<textarea class="input" id="dlgText" rows="7" readonly>${esc(o.text)}</textarea>
           <button class="btn secondary block" id="dlgCopy" style="margin-top:8px">نسخ النص</button>` : ''}
         <div class="btn-row">
-          ${o.cancel === false ? '' : '<button class="btn secondary" id="dlgNo">إلغاء</button>'}
+          ${o.cancel === false ? '' : `<button class="btn secondary" id="dlgNo">${o.cancelText || 'إلغاء'}</button>`}
           <button class="btn ${o.danger ? 'danger' : ''}" id="dlgYes">${o.ok || 'موافق'}</button>
         </div></div>`;
       d.hidden = false;
@@ -506,6 +513,198 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   $('#sheetClose').onclick = closeSheet;
   $('#sheetBackdrop').onclick = closeSheet;
 
+  /* ---------- السحابة: حفظ البيانات أونلاين ونسخ يومية ---------- */
+  const CHUNK = 80000;
+  const cloud = { db: null, state: 'off', writing: false, pending: false, cache: {}, unsub: null };
+  let cloudTimer = null;
+  const hasData = d => (d.sales.length + d.products.length + d.customers.length + d.expenses.length + d.employees.length) > 0;
+  function scheduleCloud() {
+    if (!cloud.db) return;
+    clearTimeout(cloudTimer);
+    cloudTimer = setTimeout(() => pushCloud(), 1200);
+    cloud.state = 'saving'; cloudBadge();
+  }
+  function cloudParts() {
+    const parts = {}, keys = {};
+    Object.keys(db).forEach(k => {
+      if (k === 'sync') return;
+      const str = JSON.stringify(db[k]);
+      const n = Math.max(1, Math.ceil(str.length / CHUNK));
+      keys[k] = n;
+      for (let i = 0; i < n; i++) parts['c-' + k + '-' + i] = str.slice(i * CHUNK, (i + 1) * CHUNK);
+    });
+    return { parts, keys };
+  }
+  async function pushCloud(force) {
+    if (!cloud.db) return;
+    if (cloud.writing) { cloud.pending = true; return; }
+    cloud.writing = true; cloud.state = 'saving'; cloudBadge();
+    try {
+      do {
+        cloud.pending = false;
+        const { parts, keys } = cloudParts();
+        for (const [id, str] of Object.entries(parts)) {
+          if (!force && cloud.cache[id] === str) continue;
+          await cloud.db.doc('store/' + id).set({ s: str });
+          cloud.cache[id] = str;
+        }
+        for (const id of Object.keys(cloud.cache)) {
+          if (!(id in parts)) { await cloud.db.doc('store/' + id).delete(); delete cloud.cache[id]; }
+        }
+        const rev = uid();
+        const at = new Date().toISOString();
+        await cloud.db.doc('store/meta').set({ rev, keys, updatedAt: at, app: APP_VERSION });
+        db.sync = { rev, dirty: cloud.pending, at };
+        saveLocal();
+        force = false;
+      } while (cloud.pending);
+      cloud.state = 'ok';
+    } catch (e) {
+      console.error(e);
+      cloud.state = e && e.code === 'quota_exceeded' ? 'full' : 'error';
+    } finally {
+      cloud.writing = false;
+      cloudBadge();
+      if (cloud.pending) setTimeout(() => pushCloud(), 0);
+    }
+  }
+  async function readChunks(ref, n, prefix, cacheKey) {
+    const snaps = await Promise.all(Array.from({ length: n }, (_, i) => ref(prefix + i).get()));
+    return snaps.map((sn, i) => {
+      const part = sn.exists ? sn.data().s : '';
+      if (cacheKey) cloud.cache[cacheKey + i] = part;
+      return part;
+    }).join('');
+  }
+  async function pullCloud(m) {
+    const out = {};
+    for (const [k, n] of Object.entries(m.keys || {})) {
+      const str = await readChunks(id => cloud.db.doc('store/' + id), n, 'c-' + k + '-', 'c-' + k + '-');
+      out[k] = JSON.parse(str);
+    }
+    db = normalize(out);
+    db.sync = { rev: m.rev, dirty: false, at: m.updatedAt };
+    saveLocal();
+  }
+  async function cloudInit() {
+    if (!window.claude || !window.claude.use) return;
+    let d = null;
+    try { d = await window.claude.use('db'); } catch (e) { d = null; }
+    if (!d) { cloud.state = 'off'; cloudBadge(); return; }
+    cloud.db = d; cloud.state = 'saving'; cloudBadge();
+    try {
+      const snap = await d.doc('store/meta').get();
+      const local = db.sync || {};
+      if (snap.exists) {
+        const m = snap.data();
+        if (m.rev !== local.rev) {
+          if (local.dirty && hasData(db)) {
+            const useCloud = await ask('البيانات على هذا الجهاز تختلف عن البيانات المحفوظة أونلاين.\nأي نسخة تريد تعتمد؟', { ok: 'النسخة الأونلاين', cancelText: 'نسخة هذا الجهاز' });
+            if (useCloud) await pullCloud(m);
+            else {
+              Object.entries(m.keys || {}).forEach(([k, n]) => { for (let i = 0; i < n; i++) cloud.cache['c-' + k + '-' + i] = null; });
+              await pushCloud(true);
+            }
+          } else await pullCloud(m);
+          render();
+        } else {
+          // نفس النسخة: نملأ الذاكرة حتى لا نعيد كتابة كل شيء
+          const { parts } = cloudParts();
+          Object.assign(cloud.cache, parts);
+          if (local.dirty) await pushCloud();
+        }
+      } else if (hasData(db)) await pushCloud(true);
+      cloud.state = 'ok';
+      cloud.unsub = d.doc('store/meta').onSnapshot(sn => {
+        if (!sn.exists) return;
+        const m = sn.data();
+        const cur = db.sync || {};
+        if (m.rev && m.rev !== cur.rev && !cloud.writing && !cur.dirty) {
+          pullCloud(m).then(() => { render(); toast('تم تحديث البيانات'); }).catch(() => {});
+        }
+      }, () => {});
+      await dailyBackup();
+    } catch (e) {
+      console.error(e);
+      cloud.state = 'error';
+    }
+    cloudBadge();
+  }
+  // نسخة احتياطية تلقائية مرة كل يوم (أول فتح باليوم = بيانات نهاية اليوم السابق)
+  async function dailyBackup(manual) {
+    if (!cloud.db || !hasData(db)) return;
+    const t = today();
+    if (!manual && db.settings.lastAutoBackup === t) return;
+    const n = new Date();
+    const id = manual ? t + '_' + pad(n.getHours()) + pad(n.getMinutes()) : t;
+    const copy = Object.assign({}, db); delete copy.sync;
+    const str = JSON.stringify(copy);
+    const cnt = Math.max(1, Math.ceil(str.length / CHUNK));
+    const ref = cloud.db.doc('backups/' + id);
+    for (let i = 0; i < cnt; i++) await ref.collection('parts').doc('p' + i).set({ s: str.slice(i * CHUNK, (i + 1) * CHUNK) });
+    await ref.set({ parts: cnt, createdAt: n.toISOString(), manual: !!manual, sales: db.sales.length, size: str.length });
+    if (!manual) { db.settings.lastAutoBackup = t; save(); }
+    // نحتفظ بآخر 30 نسخة
+    try {
+      const all = await cloud.db.collection('backups').get();
+      const ids = all.docs.map(x => x.id).sort();
+      for (const old of ids.slice(0, Math.max(0, ids.length - 30))) {
+        const meta = all.docs.find(x => x.id === old).data() || {};
+        for (let i = 0; i < (meta.parts || 1); i++) await cloud.db.doc('backups/' + old + '/parts/p' + i).delete();
+        await cloud.db.doc('backups/' + old).delete();
+      }
+    } catch (e) { /* التنظيف ليس ضرورياً */ }
+  }
+  function cloudBadge() {
+    const txt = {
+      off: ['b-gray', 'البيانات على هذا الجهاز فقط'],
+      saving: ['b-blue', '☁️ جاري الحفظ أونلاين…'],
+      ok: ['b-green', '☁️ محفوظ أونلاين'],
+      error: ['b-red', '⚠️ تعذر الحفظ أونلاين، سيعاد المحاولة'],
+      full: ['b-red', '⚠️ مساحة التخزين أونلاين ممتلئة']
+    }[cloud.state] || ['b-gray', ''];
+    document.querySelectorAll('.cloud-badge').forEach(el => { el.className = 'badge cloud-badge ' + txt[0]; el.textContent = txt[1]; });
+    if (cloud.state === 'error') { clearTimeout(cloudTimer); cloudTimer = setTimeout(() => pushCloud(), 15000); }
+  }
+  const cloudBadgeHTML = () => '<span class="badge cloud-badge b-gray"></span>';
+  async function cloudBackups() {
+    if (!cloud.db) return ask('الحفظ أونلاين غير متاح هنا.', { cancel: false });
+    openSheet('النسخ الاحتياطية أونلاين', '<div class="empty">جاري التحميل…</div>');
+    try {
+      const all = await cloud.db.collection('backups').get();
+      const list = all.docs.slice().sort((a, b) => b.id.localeCompare(a.id));
+      $('#sheetBody').innerHTML = `
+        <button class="btn block" style="margin-bottom:12px" onclick="App.backupNow()">أخذ نسخة الآن</button>
+        <div class="card small muted">البرنامج يأخذ نسخة تلقائية كل يوم، ويحتفظ بآخر ٣٠ نسخة. اضغط على أي نسخة حتى ترجع لها.</div>
+        ${list.length ? `<div class="list">${list.map(x => { const m = x.data() || {}; const dt = new Date(m.createdAt);
+          return `<div class="row" onclick="App.restoreCloudBackup('${x.id}')"><div class="grow"><div class="t">${fmtDate(dstr(dt))} — ${digits(pad(dt.getHours()) + ':' + pad(dt.getMinutes()))}</div>
+          <div class="s">${m.manual ? 'نسخة يدوية' : 'نسخة يومية تلقائية'} · ${num(m.sales || 0)} فاتورة بيع</div></div><span class="badge b-blue">استرجاع</span></div>`; }).join('')}</div>` : '<div class="card empty">لا توجد نسخ بعد</div>'}`;
+    } catch (e) { $('#sheetBody').innerHTML = '<div class="card empty">تعذر تحميل النسخ، حاول مرة أخرى.</div>'; }
+  }
+  async function restoreCloudBackup(id) {
+    if (!(await ask('سيتم استبدال البيانات الحالية بهذه النسخة. متابعة؟\n(يتم أخذ نسخة من البيانات الحالية قبل الاسترجاع)', { ok: 'استرجاع' }))) return;
+    try {
+      await dailyBackup(true);
+      const meta = (await cloud.db.doc('backups/' + id).get()).data();
+      const str = await readChunks(i => cloud.db.doc('backups/' + id + '/parts/' + i), meta.parts || 1, 'p');
+      closeSheet();
+      restoreDB(str);
+    } catch (e) { ask('تعذر استرجاع النسخة.', { cancel: false }); }
+  }
+  async function backupNow() {
+    toast('جاري أخذ نسخة…');
+    try { await dailyBackup(true); toast('تم أخذ النسخة'); cloudBackups(); }
+    catch (e) { ask('تعذر أخذ النسخة، حاول مرة أخرى.', { cancel: false }); }
+  }
+  async function updateApp() {
+    toast('جاري التحديث…');
+    if (cloud.db && (db.sync || {}).dirty) { clearTimeout(cloudTimer); await pushCloud(); }
+    if (!EMBED && navigator.serviceWorker) {
+      try { const r = await navigator.serviceWorker.getRegistration(); if (r) await r.update(); } catch (e) { /* */ }
+    }
+    setTimeout(() => location.reload(), 300);
+  }
+
   /* ---------- Router ---------- */
   const ROOTS = ['home', 'sales', 'stock', 'reports', 'more'];
   const TAB_OF = { 'sale-new': 'sales', 'purchase-new': 'more' };
@@ -522,6 +721,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     document.querySelectorAll('#tabbar a').forEach(a => a.classList.toggle('active', a.dataset.tab === tab));
     $('#view').innerHTML = '';
     view();
+    cloudBadge();
     window.scrollTo(0, 0);
   }
   $('#backBtn').onclick = () => { if (history.length > 1) history.back(); else go('home'); };
@@ -543,6 +743,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const recent = db.sales.slice(-5).reverse();
 
     V(`
+      <div style="margin:0 2px 8px">${cloudBadgeHTML()}</div>
       <div class="hero">
         <div class="l">مبيعات اليوم — ${fmtDate(t)}</div>
         <div class="v">${money(day.revenue)}</div>
@@ -1805,6 +2006,15 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <label class="field" style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="sDig" ${s.arabicDigits ? 'checked' : ''} style="width:22px;height:22px"><span style="margin:0">عرض الأرقام بالهندية (١٢٣)</span></label>
         <button class="btn block" onclick="App.saveSettings()">حفظ الإعدادات</button>
       </div>
+      <div class="section-title">التحديث والحفظ أونلاين</div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px"><span class="bold">حالة البيانات</span>${cloudBadgeHTML()}</div>
+        <p class="small muted" style="margin-top:0">كل عملية تحفظ أونلاين تلقائياً، وتبقى البيانات حتى لو تحدث البرنامج. البرنامج يأخذ نسخة احتياطية تلقائية كل يوم.</p>
+        <div class="btn-row">
+          <button class="btn" onclick="App.updateApp()">تحديث البرنامج</button>
+          <button class="btn secondary" onclick="App.cloudBackups()">النسخ اليومية</button>
+        </div>
+      </div>
       <div class="section-title">النسخ الاحتياطي</div>
       <div class="card">
         <p class="small muted" style="margin-top:0">البيانات محفوظة على هذا الجهاز فقط. خذ نسخة احتياطية بشكل دوري واحفظها في «الملفات» أو أرسلها لنفسك على الواتساب/التلغرام.
@@ -1821,7 +2031,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         ${!db.products.length && !db.sales.length ? `<button class="btn secondary block" style="margin-bottom:10px" onclick="App.loadDemo()">تحميل بيانات تجريبية للتجربة</button>` : ''}
         <button class="btn danger block" onclick="App.resetAll()">مسح جميع البيانات</button>
       </div>
-      <p class="small muted" style="text-align:center">حساباتي — الإصدار 1.0</p>
+      <p class="small muted" style="text-align:center">حساباتي — الإصدار ${APP_VERSION}</p>
     `);
   }
   function saveSettings() {
@@ -1916,7 +2126,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     expenseForm, saveExpense, deleteExpense,
     employeeForm, saveEmployee, deleteEmployee, showEmployee, advanceForm, saveAdvance, deleteAdvance,
     payrollForm, prCalc, savePayroll, payAll, showPayslip, deletePayroll,
-    printReport, reportPDF, saveSettings, exportData, importData, importText, resetAll, loadDemo, picker,
+    printReport, reportPDF, saveSettings, updateApp, cloudBackups, restoreCloudBackup, backupNow, exportData, importData, importText, resetAll, loadDemo, picker,
     newInvoice(kind) { ed = newEd(kind); if (location.hash === '#' + kind + '-new') render(); else go(kind + '-new'); },
     edType(t) { ed.type = t; if (t === 'cash') ed.paid = 0; render(); },
     edField(k, v) { ed[k] = v; if (k === 'partyId') render(); else if (k === 'discount' || k === 'paid') edRefresh(false); },
@@ -1956,6 +2166,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   };
 
   render();
+  cloudInit();
 
   if ('serviceWorker' in navigator && location.protocol !== 'file:') {
     window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
