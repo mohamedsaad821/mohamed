@@ -805,8 +805,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="btn-row">
         <button class="btn secondary no-embed" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>
         <button class="btn secondary" onclick="App.invoicePDF('${kind}','${id}')">PDF</button>
+        ${kind === 'sale' && db.settings.invoiceTemplate !== false ? `<button class="btn secondary" onclick="App.invoiceImage('${id}')">صورة</button>` : ''}
         ${(() => { const c = kind === 'sale' && byId(db.customers, inv.customerId); return c && waNumber(c.phone) ? `<a class="btn wa-btn" href="${esc(waLink(c.phone, invoiceText('sale', inv)))}" target="_blank" rel="noopener">واتساب</a>` : `<button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة نص</button>`; })()}
       </div>
+      ${(() => { const c = kind === 'sale' && db.settings.invoiceTemplate !== false && byId(db.customers, inv.customerId); return c && waNumber(c.phone) ? `<div class="btn-row"><button class="btn wa-btn" onclick="App.waImage('${id}')">إرسال صورة الفاتورة على واتساب ${esc(c.name)}</button></div>` : ''; })()}
       <div class="btn-row"><button class="btn danger" onclick="App.deleteInvoice('${kind}','${id}')">حذف الفاتورة</button></div>
     `);
   }
@@ -993,6 +995,57 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       ask('حدث خطأ أثناء تجهيز الفاتورة. حاول مرة أخرى.', { cancel: false });
     } finally { pdfBusy = false; }
     if (ok) offerWhatsApp(inv);
+  }
+
+  // صورة الفاتورة (كل الصفحات فوق بعض)
+  async function invoiceImageBlob(inv) {
+    const im = await loadTpl();
+    const pages = templatePages(inv, im);
+    let c = pages[0];
+    if (pages.length > 1) {
+      c = document.createElement('canvas');
+      c.width = pages[0].width; c.height = pages[0].height * pages.length;
+      const x = c.getContext('2d');
+      pages.forEach((pg, i) => x.drawImage(pg, 0, pg.height * i));
+    }
+    return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('blob')), 'image/png'));
+  }
+  async function saleInvoiceImage(inv) {
+    if (pdfBusy) return;
+    pdfBusy = true; toast('جاري تجهيز الصورة…');
+    try {
+      let blob;
+      try { blob = await invoiceImageBlob(inv); }
+      catch (e) { return ask('تعذر تجهيز الصورة. تأكد من اتصال الإنترنت وحاول مرة أخرى.', { cancel: false }); }
+      await deliverFile(blob, 'فاتورة-' + inv.no + '.png', 'فاتورة #' + inv.no);
+    } finally { pdfBusy = false; }
+  }
+  // نسخ صورة الفاتورة ثم فتح محادثة الزبون؛ يلصقها ويضغط إرسال
+  function waInvoiceImage(inv) {
+    const cust = byId(db.customers, inv.customerId);
+    if (!cust || !waNumber(cust.phone)) return ask('أضف رقم واتساب للزبون أولاً من صفحة العملاء.', { cancel: false });
+    const link = 'https://wa.me/' + waNumber(cust.phone);
+    const blobP = invoiceImageBlob(inv);
+    let copied;
+    try {
+      if (!navigator.clipboard || !window.ClipboardItem) throw new Error('no clipboard');
+      // يجب استدعاء الكتابة مباشرة أثناء الضغط (متطلب سفاري)
+      copied = navigator.clipboard.write([new ClipboardItem({ 'image/png': blobP })]);
+    } catch (e) { copied = Promise.reject(e); }
+    toast('جاري تجهيز الصورة…');
+    copied.then(() => {
+      ask(`تم نسخ صورة الفاتورة ✓\n\n١. اضغط «فتح واتساب ${cust.name}».\n٢. اضغط مطولاً على خانة الكتابة واختر «لصق».\n٣. اضغط «إرسال».`, {
+        cancel: false, ok: 'إغلاق',
+        html: `<a class="btn block wa-btn dlg-close" href="${esc(link)}" target="_blank" rel="noopener">فتح واتساب ${esc(cust.name)}</a>`
+      });
+    }).catch(async () => {
+      // إذا ما نجح النسخ: نشارك الصورة كملف ثم نفتح المحادثة
+      try { await deliverFile(await blobP, 'فاتورة-' + inv.no + '.png', 'فاتورة #' + inv.no); } catch (e) { /* */ }
+      ask(`احفظ الصورة أو شاركها، ثم افتح محادثة ${cust.name} وأرفقها واضغط «إرسال».`, {
+        cancel: false, ok: 'إغلاق',
+        html: `<a class="btn block wa-btn dlg-close" href="${esc(link)}" target="_blank" rel="noopener">فتح واتساب ${esc(cust.name)}</a>`
+      });
+    });
   }
 
   /* ---------- واتساب ---------- */
@@ -1885,6 +1938,8 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       if (kind === 'sale' && db.settings.invoiceTemplate !== false) return saleInvoicePDF(inv);
       makePDF((kind === 'sale' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + inv.no, invoiceHTML(kind, inv), (kind === 'sale' ? 'فاتورة-' : 'شراء-') + inv.no + '.pdf');
     },
+    invoiceImage(id) { const inv = byId(db.sales, id); if (inv) saleInvoiceImage(inv); },
+    waImage(id) { const inv = byId(db.sales, id); if (inv) waInvoiceImage(inv); },
     payslipPDF(id) {
       const p = byId(db.payrolls, id); if (!p) return;
       const e = byId(db.employees, p.employeeId);
