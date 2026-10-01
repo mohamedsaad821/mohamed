@@ -35,7 +35,7 @@
   let db = load();
   function save() {
     try { localStorage.setItem(KEY, JSON.stringify(db)); }
-    catch (e) { alert('تعذر حفظ البيانات! يرجى أخذ نسخة احتياطية فوراً.'); }
+    catch (e) { toast('تعذر حفظ البيانات! يرجى أخذ نسخة احتياطية فوراً.'); }
   }
   if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
@@ -64,6 +64,36 @@
   function monthName(ym) { const [y, m] = ym.split('-'); return MONTHS[Number(m) - 1] + ' ' + digits(y); }
   function val(id) { const el = document.getElementById(id); return el ? el.value.trim() : ''; }
   function nval(id) { return toNum(val(id)); }
+
+  // داخل إطار (رابط المعاينة) لا تعمل الطباعة ولا التنزيل
+  const EMBED = (() => { try { return window.self !== window.top; } catch (e) { return true; } })();
+  if (EMBED) document.documentElement.classList.add('embed');
+
+  // نافذة تأكيد داخل الصفحة بدلاً من confirm/alert/prompt
+  function ask(msg, o = {}) {
+    return new Promise(res => {
+      const d = $('#dlg');
+      d.innerHTML = `<div class="dlg-box" role="alertdialog">
+        <div class="dlg-msg">${esc(msg).replace(/\n/g, '<br>')}</div>
+        ${o.input === 'area' ? '<textarea class="input" id="dlgIn" rows="6"></textarea>' : o.input ? '<input class="input" id="dlgIn">' : ''}
+        ${o.text != null ? `<textarea class="input" id="dlgText" rows="7" readonly>${esc(o.text)}</textarea>
+          <button class="btn secondary block" id="dlgCopy" style="margin-top:8px">نسخ النص</button>` : ''}
+        <div class="btn-row">
+          ${o.cancel === false ? '' : '<button class="btn secondary" id="dlgNo">إلغاء</button>'}
+          <button class="btn ${o.danger ? 'danger' : ''}" id="dlgYes">${o.ok || 'موافق'}</button>
+        </div></div>`;
+      d.hidden = false;
+      const done = v => { d.hidden = true; d.innerHTML = ''; res(v); };
+      $('#dlgYes').onclick = () => done(o.input ? val('dlgIn') : true);
+      const no = $('#dlgNo'); if (no) no.onclick = () => done(o.input ? null : false);
+      const cp = $('#dlgCopy');
+      if (cp) cp.onclick = () => {
+        const ta = $('#dlgText');
+        navigator.clipboard.writeText(o.text).then(() => toast('تم النسخ')).catch(() => { ta.focus(); ta.select(); });
+      };
+      const inp = $('#dlgIn'); if (inp) setTimeout(() => inp.focus(), 50);
+    });
+  }
 
   let toastTimer;
   function toast(msg) {
@@ -346,14 +376,14 @@
     `, () => { if (ed && $('#edLines')) edRefresh(true); });
   }
   let pickerDraw = null;
-  function edSave() {
+  async function edSave() {
     const isSale = ed.kind === 'sale';
     const lines = ed.lines.filter(l => l.qty > 0);
     if (!lines.length) return toast('أضف منتجاً واحداً على الأقل');
     if (ed.type === 'credit' && !ed.partyId) return toast(isSale ? 'اختر الزبون للبيع الآجل' : 'اختر المورد للشراء الآجل');
     if (isSale) {
       const short = lines.filter(l => l.qty > stockOf(l.productId));
-      if (short.length && !confirm('الكمية المطلوبة أكبر من المتوفر في المخزن:\n' + short.map(l => '• ' + l.name + ' (المتوفر ' + num(stockOf(l.productId)) + ')').join('\n') + '\n\nهل تريد المتابعة؟')) return;
+      if (short.length && !(await ask('الكمية المطلوبة أكبر من المتوفر في المخزن:\n' + short.map(l => '• ' + l.name + ' (المتوفر ' + num(stockOf(l.productId)) + ')').join('\n') + '\n\nهل تريد المتابعة؟'))) return;
     }
     const t = edTotals();
     const doc = {
@@ -413,7 +443,7 @@
     openSheet((kind === 'sale' ? 'فاتورة بيع #' : 'فاتورة شراء #') + num(inv.no), `
       ${invoiceHTML(kind, inv)}
       <div class="btn-row">
-        <button class="btn secondary" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>
+        <button class="btn secondary no-embed" onclick="App.printInvoice('${kind}','${id}')">طباعة</button>
         <button class="btn secondary" onclick="App.shareInvoice('${kind}','${id}')">مشاركة</button>
       </div>
       <div class="btn-row"><button class="btn danger" onclick="App.deleteInvoice('${kind}','${id}')">حذف الفاتورة</button></div>
@@ -437,10 +467,10 @@
   }
   async function shareText(text, title) {
     if (navigator.share) { try { await navigator.share({ title, text }); return; } catch (e) { if (e.name === 'AbortError') return; } }
-    try { await navigator.clipboard.writeText(text); toast('تم النسخ'); } catch (e) { alert(text); }
+    try { await navigator.clipboard.writeText(text); toast('تم النسخ'); } catch (e) { ask('انسخ النص:', { cancel: false, text }); }
   }
-  function deleteInvoice(kind, id) {
-    if (!confirm('هل أنت متأكد من حذف الفاتورة؟ سيتم تعديل المخزن تلقائياً.')) return;
+  async function deleteInvoice(kind, id) {
+    if (!(await ask('هل أنت متأكد من حذف الفاتورة؟ سيتم تعديل المخزن تلقائياً.'))) return;
     const arr = kind === 'sale' ? db.sales : db.purchases;
     const inv = byId(arr, id); if (!inv) return;
     inv.items.forEach(l => { const p = byId(db.products, l.productId); if (p) p.qty = round3(p.qty + (kind === 'sale' ? l.qty : -l.qty)); });
@@ -508,23 +538,23 @@
     openSheet(p ? 'تعديل منتج' : 'منتج جديد', html, fromPicker ? () => { if (ed && $('#edLines')) edRefresh(true); } : null);
     if (!p) setTimeout(() => { const el = $('#pName'); if (el) el.focus(); }, 250);
   }
-  function saveProduct(id, fromPicker) {
+  async function saveProduct(id, fromPicker) {
     const name = val('pName');
     if (!name) return toast('اكتب اسم المنتج');
     const data = { name, unit: val('pUnit'), code: val('pCode'), cost: Math.round(nval('pCost')), price: Math.round(nval('pPrice')), qty: round3(nval('pQty')), minQty: nval('pMin') };
-    if (data.price && data.cost && data.price < data.cost && !confirm('سعر البيع أقل من سعر الشراء. هل تريد المتابعة؟')) return;
+    if (data.price && data.cost && data.price < data.cost && !(await ask('سعر البيع أقل من سعر الشراء. هل تريد المتابعة؟'))) return;
     let p;
     if (id) { p = byId(db.products, id); Object.assign(p, data); }
     else {
-      if (db.products.some(x => x.name === name) && !confirm('يوجد منتج بنفس الاسم. إضافة على أي حال؟')) return;
+      if (db.products.some(x => x.name === name) && !(await ask('يوجد منتج بنفس الاسم. إضافة على أي حال؟'))) return;
       p = Object.assign({ id: uid(), createdAt: today() }, data); db.products.push(p);
     }
     save();
     if (fromPicker && ed) { edAdd(p); toast('تمت الإضافة للفاتورة'); closeSheet(); return; }
     closeSheet(); toast('تم الحفظ'); render();
   }
-  function deleteProduct(id) {
-    if (!confirm('حذف المنتج؟ (الفواتير القديمة لن تتأثر)')) return;
+  async function deleteProduct(id) {
+    if (!(await ask('حذف المنتج؟ (الفواتير القديمة لن تتأثر)'))) return;
     db.products = db.products.filter(p => p.id !== id);
     save(); closeSheet(); render(); toast('تم الحذف');
   }
@@ -623,10 +653,10 @@
     lines.push('', 'الرصيد المتبقي: ' + money(partyBalance(kind, id)));
     shareText(lines.join('\n'), 'كشف حساب');
   }
-  function deleteParty(kind, id) {
+  async function deleteParty(kind, id) {
     const P = PARTY[kind];
-    if (P.invoices(id).length || P.pay().some(p => p.partyId === id)) return alert('لا يمكن حذف ' + P.one + ' لديه فواتير أو دفعات. احذف الحركات أولاً.');
-    if (!confirm('حذف ' + P.one + '؟')) return;
+    if (P.invoices(id).length || P.pay().some(p => p.partyId === id)) return ask('لا يمكن حذف ' + P.one + ' لديه فواتير أو دفعات. احذف الحركات أولاً.', { cancel: false });
+    if (!(await ask('حذف ' + P.one + '؟'))) return;
     P.set(P.list().filter(c => c.id !== id));
     save(); closeSheet(); render();
   }
@@ -658,9 +688,9 @@
     save(); closeSheet(); toast('تم حفظ الدفعة'); render();
     if (location.hash.slice(1) === PARTY[kind].route) setTimeout(() => showParty(kind, partyId), 50);
   }
-  function deletePayment(kind, pid) {
+  async function deletePayment(kind, pid) {
     const arr = PARTY[kind].pay(); const p = byId(arr, pid); if (!p) return;
-    if (!confirm('حذف هذه الدفعة (' + money(p.amount) + ')؟')) return;
+    if (!(await ask('حذف هذه الدفعة (' + money(p.amount) + ')؟'))) return;
     arr.splice(arr.indexOf(p), 1); save(); closeSheet(); render(); toast('تم الحذف');
   }
 
@@ -708,8 +738,8 @@
     else db.expenses.push(Object.assign({ id: uid(), createdAt: new Date().toISOString() }, data));
     save(); closeSheet(); toast('تم الحفظ'); render();
   }
-  function deleteExpense(id) {
-    if (!confirm('حذف المصروف؟')) return;
+  async function deleteExpense(id) {
+    if (!(await ask('حذف المصروف؟'))) return;
     db.expenses = db.expenses.filter(e => e.id !== id); save(); closeSheet(); render();
   }
 
@@ -764,11 +794,11 @@
     else db.employees.push(Object.assign({ id: uid(), active: true }, data));
     save(); closeSheet(); toast('تم الحفظ'); render();
   }
-  function deleteEmployee(id) {
+  async function deleteEmployee(id) {
     if (db.payrolls.some(p => p.employeeId === id) || db.advances.some(a => a.employeeId === id)) {
-      return alert('لهذا الموظف رواتب أو سلف مسجلة. بدلاً من الحذف، عدّل بياناته وأزل علامة «على رأس العمل».');
+      return ask('لهذا الموظف رواتب أو سلف مسجلة. بدلاً من الحذف، عدّل بياناته وأزل علامة «على رأس العمل».', { cancel: false });
     }
-    if (!confirm('حذف الموظف؟')) return;
+    if (!(await ask('حذف الموظف؟'))) return;
     db.employees = db.employees.filter(e => e.id !== id); save(); closeSheet(); render();
   }
   function showEmployee(id) {
@@ -809,9 +839,9 @@
     db.advances.push({ id: uid(), employeeId: val('aEmp'), amount, date: val('aDate') || today(), note: val('aNote') });
     save(); closeSheet(); toast('تم تسجيل السلفة'); render();
   }
-  function deleteAdvance(id) {
+  async function deleteAdvance(id) {
     const a = byId(db.advances, id); if (!a) return;
-    if (!confirm('حذف السلفة (' + money(a.amount) + ')؟')) return;
+    if (!(await ask('حذف السلفة (' + money(a.amount) + ')؟'))) return;
     db.advances = db.advances.filter(x => x.id !== id); save(); closeSheet(); render();
   }
 
@@ -837,9 +867,9 @@
       }).join('')}</div>` : '<div class="card empty">لا يوجد موظفون. <a href="#employees">أضف موظفاً</a></div>'}
     `);
   }
-  function payrollForm(empId, month) {
+  async function payrollForm(empId, month) {
     const e = byId(db.employees, empId); if (!e) return;
-    if (db.payrolls.some(p => p.employeeId === empId && p.month === month) && !confirm('تم صرف راتب ' + monthName(month) + ' لهذا الموظف سابقاً. صرف مرة أخرى؟')) return;
+    if (db.payrolls.some(p => p.employeeId === empId && p.month === month) && !(await ask('تم صرف راتب ' + monthName(month) + ' لهذا الموظف سابقاً. صرف مرة أخرى؟'))) return;
     const adv = advBalance(empId);
     openSheet('صرف راتب: ' + e.name, `
       <label class="field"><span>عن شهر</span><input type="month" class="input" id="prMonth" value="${month}"></label>
@@ -874,11 +904,11 @@
     db.payrolls.push(rec); save(); closeSheet(); toast('تم صرف الراتب'); render();
     setTimeout(() => showPayslip(rec.id), 50);
   }
-  function payAll() {
+  async function payAll() {
     const paidIds = db.payrolls.filter(p => p.month === payMonth).map(p => p.employeeId);
     const list = db.employees.filter(e => e.active !== false && !paidIds.includes(e.id));
     const rows = list.map(e => { const adv = Math.min(advBalance(e.id), e.salary); return { e, adv, net: e.salary - adv }; });
-    if (!confirm(`صرف رواتب ${monthName(payMonth)} لـ ${list.length} موظف؟\nالمجموع الصافي: ${money(sum(rows, r => r.net))}\n(يتم خصم السلف تلقائياً، بدون مكافآت أو خصومات)`)) return;
+    if (!(await ask(`صرف رواتب ${monthName(payMonth)} لـ ${list.length} موظف؟\nالمجموع الصافي: ${money(sum(rows, r => r.net))}\n(يتم خصم السلف تلقائياً، بدون مكافآت أو خصومات)`))) return;
     rows.forEach(({ e, adv, net }) => db.payrolls.push({ id: uid(), employeeId: e.id, month: payMonth, base: e.salary, bonus: 0, deduction: 0, advDeducted: adv, net, date: today(), note: '' }));
     save(); render(); toast('تم صرف الرواتب');
   }
@@ -899,11 +929,11 @@
   function showPayslip(id) {
     const p = byId(db.payrolls, id); if (!p) return;
     openSheet('قسيمة الراتب', `${payslipHTML(p)}
-      <div class="btn-row"><button class="btn secondary" onclick="App.printPayslip('${id}')">طباعة</button>
+      <div class="btn-row"><button class="btn secondary no-embed" onclick="App.printPayslip('${id}')">طباعة</button>
       <button class="btn danger" onclick="App.deletePayroll('${id}')">إلغاء الصرف</button></div>`);
   }
-  function deletePayroll(id) {
-    if (!confirm('إلغاء صرف هذا الراتب؟ (السلف المخصومة ستعود لرصيد الموظف)')) return;
+  async function deletePayroll(id) {
+    if (!(await ask('إلغاء صرف هذا الراتب؟ (السلف المخصومة ستعود لرصيد الموظف)'))) return;
     db.payrolls = db.payrolls.filter(p => p.id !== id); save(); closeSheet(); render();
   }
 
@@ -919,7 +949,7 @@
     return [rp.from || today(), rp.to || today()];
   }
   function reports() {
-    setTop('التقارير', `<button class="link-btn" onclick="App.printReport()">طباعة</button>`);
+    setTop('التقارير', `<button class="link-btn no-embed" onclick="App.printReport()">طباعة</button>`);
     if (!rp.from) { rp.from = thisMonth() + '-01'; rp.to = today(); }
     const presets = [['today', 'اليوم'], ['week', 'آخر ٧ أيام'], ['month', 'هذا الشهر'], ['last', 'الشهر الماضي'], ['year', 'هذه السنة'], ['custom', 'فترة محددة']];
     const tabs = [['profit', 'الأرباح'], ['sales', 'المبيعات'], ['expenses', 'المصاريف'], ['customers', 'العملاء'], ['stock', 'المخزن'], ['salaries', 'الرواتب']];
@@ -1116,6 +1146,7 @@
           <button class="btn" onclick="App.exportData()">أخذ نسخة احتياطية</button>
           <button class="btn secondary" onclick="document.getElementById('importFile').click()">استرجاع نسخة</button>
         </div>
+        <button class="btn secondary block" style="margin-top:10px" onclick="App.importText()">استرجاع من نص</button>
         <input type="file" id="importFile" accept=".json,application/json" hidden onchange="App.importData(this)">
       </div>
       <div class="section-title">أخرى</div>
@@ -1133,6 +1164,10 @@
   async function exportData() {
     db.settings.lastBackup = new Date().toISOString(); save();
     const json = JSON.stringify(db, null, 1);
+    if (EMBED) {
+      await ask('انسخ هذا النص واحفظه في «الملاحظات» أو أرسله لنفسك. لاسترجاعه اضغط «استرجاع من نص» والصق النص.', { cancel: false, text: json });
+      render(); return;
+    }
     const name = 'hesabati-backup-' + today() + '.json';
     const file = new File([json], name, { type: 'application/json' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {
@@ -1144,23 +1179,33 @@
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     toast('تم تنزيل النسخة'); render();
   }
+  function restoreDB(text) {
+    const d = JSON.parse(text);
+    if (!d || !Array.isArray(d.products) || !Array.isArray(d.sales)) throw new Error('bad');
+    db = normalize(d); save(); toast('تم استرجاع البيانات'); go('home'); render();
+  }
+  async function importText() {
+    const t = await ask('الصق نص النسخة الاحتياطية هنا. سيتم استبدال جميع البيانات الحالية.', { input: 'area', ok: 'استرجاع' });
+    if (!t) return;
+    try { restoreDB(t); } catch (e) { ask('النص غير صالح. تأكد أنك نسخت النسخة الاحتياطية كاملة.', { cancel: false }); }
+  }
   function importData(input) {
     const f = input.files && input.files[0]; if (!f) return;
     const r = new FileReader();
-    r.onload = () => {
+    r.onload = async () => {
       try {
         const d = JSON.parse(r.result);
         if (!d || !Array.isArray(d.products) || !Array.isArray(d.sales)) throw new Error('bad');
-        if (!confirm('سيتم استبدال جميع البيانات الحالية بالنسخة الاحتياطية. متابعة؟')) return;
+        if (!(await ask('سيتم استبدال جميع البيانات الحالية بالنسخة الاحتياطية. متابعة؟'))) return;
         db = normalize(d); save(); toast('تم استرجاع البيانات'); go('home'); render();
-      } catch (e) { alert('الملف غير صالح'); }
+      } catch (e) { ask('الملف غير صالح', { cancel: false }); }
       input.value = '';
     };
     r.readAsText(f);
   }
-  function resetAll() {
-    if (!confirm('سيتم مسح كل البيانات نهائياً! هل أخذت نسخة احتياطية؟')) return;
-    if (prompt('للتأكيد اكتب كلمة: مسح') !== 'مسح') return;
+  async function resetAll() {
+    if (!(await ask('سيتم مسح كل البيانات نهائياً! هل أخذت نسخة احتياطية؟'))) return;
+    if ((await ask('للتأكيد اكتب كلمة: مسح', { input: true, danger: true })) !== 'مسح') return;
     db = defaults(); save(); toast('تم مسح البيانات'); go('home'); render();
   }
   function loadDemo() {
@@ -1199,14 +1244,14 @@
     expenseForm, saveExpense, deleteExpense,
     employeeForm, saveEmployee, deleteEmployee, showEmployee, advanceForm, saveAdvance, deleteAdvance,
     payrollForm, prCalc, savePayroll, payAll, showPayslip, deletePayroll,
-    printReport, saveSettings, exportData, importData, resetAll, loadDemo, picker,
+    printReport, saveSettings, exportData, importData, importText, resetAll, loadDemo, picker,
     newInvoice(kind) { ed = newEd(kind); if (location.hash === '#' + kind + '-new') render(); else go(kind + '-new'); },
     edType(t) { ed.type = t; if (t === 'cash') ed.paid = 0; render(); },
     edField(k, v) { ed[k] = v; if (k === 'discount' || k === 'paid') edRefresh(false); },
     edLine(i, k, v) { ed.lines[i][k] = toNum(v); edRefresh(false); },
     edStep(i, d) { const l = ed.lines[i]; l.qty = Math.max(0, round3(l.qty + d)); if (l.qty === 0) ed.lines.splice(i, 1); edRefresh(true); },
     edDel(i) { ed.lines.splice(i, 1); edRefresh(true); },
-    edSave, edCancel() { if (ed.lines.length && !confirm('إلغاء الفاتورة؟')) return; const k = ed.kind; ed = null; go(k === 'sale' ? 'sales' : 'purchases'); },
+    edSave, async edCancel() { if (ed.lines.length && !(await ask('إلغاء الفاتورة؟'))) return; const k = ed.kind; ed = null; go(k === 'sale' ? 'sales' : 'purchases'); },
     edNewParty() { partyForm(ed.kind === 'sale' ? 'customer' : 'supplier', null, rec => { ed.partyId = rec.id; render(); }); },
     pick(id) { const p = byId(db.products, id); if (!p) return; edAdd(p); $('#pickList').innerHTML = pickerDraw(val('pickQ')); toast('تمت إضافة ' + p.name); },
     pickSearch(q) { $('#pickList').innerHTML = pickerDraw(q); },
