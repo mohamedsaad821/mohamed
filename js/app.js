@@ -238,6 +238,9 @@
         <button class="action" onclick="App.advanceForm()"><span class="ai">🤝</span>سلفة موظف</button>
         <button class="action" onclick="App.go('payroll')"><span class="ai">👥</span>الرواتب</button>
       </div>
+      ${showInstallHint() ? `<div class="card" style="background:var(--blue-soft);color:var(--blue)"><b>ثبّت البرنامج على الشاشة الرئيسية:</b><br>
+        اضغط زر المشاركة <b>⬆︎</b> بأسفل سفاري ← <b>إضافة إلى الشاشة الرئيسية</b> ← <b>إضافة</b>.<br>
+        <span class="small">إذا عندك بيانات بالنسخة القديمة: خذ منها نسخة احتياطية، وبعدين هنا من الإعدادات ← استرجاع نسخة.</span></div>` : ''}
       ${needBackup ? `<div class="card" style="background:var(--amber-soft);color:var(--amber)"><b>تذكير:</b> ${activeToday ? 'لم تأخذ نسخة احتياطية لشغل اليوم.' : 'لم تأخذ نسخة احتياطية منذ أكثر من أسبوع.'} <a href="#settings" class="bold">خذ نسخة الآن</a></div>` : ''}
       <div class="stats">
         <div class="stat wide"><div class="l">رصيد الصندوق (النقد المتوفر)</div><div class="v">${money(cashBox())}</div></div>
@@ -254,6 +257,13 @@
       <div class="section-title">آخر المبيعات</div>
       ${recent.length ? `<div class="list">${recent.map(saleRow).join('')}</div>` : `<div class="card empty">لا توجد مبيعات بعد. اضغط «بيع جديد» للبدء.${!db.products.length ? '<br><br><a href="#stock" class="bold">ابدأ بإضافة منتجاتك إلى المخزن</a>' : ''}</div>`}
     `);
+  }
+
+  // يظهر فقط عند فتح البرنامج من سفاري على الآيفون وقبل تثبيته
+  function showInstallHint() {
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const standalone = window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+    return ios && !standalone && !EMBED;
   }
 
   /* ---------- Sales / Purchases lists ---------- */
