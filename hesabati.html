@@ -449,11 +449,23 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   /* ---------- Calculations ---------- */
   const lineCost = s => sum(s.items, l => l.qty * l.cost);
   const saleProfit = s => s.total - lineCost(s);
-  const customerBalance = id =>
+  const openingOf = (arr, id) => { const c = byId(arr, id); return c ? Number(c.opening) || 0 : 0; };
+  const customerBalance = id => openingOf(db.customers, id) +
     sum(db.sales.filter(s => s.customerId === id), s => s.total - s.paid) - sum(db.payments.filter(p => p.partyId === id), p => p.amount);
-  const supplierBalance = id =>
+  const supplierBalance = id => openingOf(db.suppliers, id) +
     sum(db.purchases.filter(s => s.supplierId === id), s => s.total - s.paid) - sum(db.supplierPayments.filter(p => p.partyId === id), p => p.amount);
   const partyBalance = (kind, id) => kind === 'customer' ? customerBalance(id) : supplierBalance(id);
+  // نص الرصيد: «عليه» = مطلوب لي، «له» = أنا مطلوب له
+  function balWord(kind, bal) {
+    if (!Math.round(bal)) return 'لا يوجد رصيد';
+    const owesMe = kind === 'customer' ? bal > 0 : bal < 0;
+    return (owesMe ? 'عليه ' : 'له ') + money(Math.abs(bal));
+  }
+  function balBadge(kind, bal) {
+    if (!Math.round(bal)) return '<span class="badge b-green">لا يوجد رصيد</span>';
+    const owesMe = kind === 'customer' ? bal > 0 : bal < 0;
+    return `<span class="badge ${owesMe ? 'b-amber' : 'b-blue'}">${balWord(kind, bal)}</span>`;
+  }
   const advBalance = empId =>
     sum(db.advances.filter(a => a.employeeId === empId), a => a.amount) - sum(db.payrolls.filter(p => p.employeeId === empId), p => p.advDeducted);
   const payrollCost = p => p.base + p.bonus - p.deduction;
@@ -520,7 +532,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const day = profitIn(t, t);
     const mon = profitIn(m + '-01', m + '-31');
     const recv = sum(db.customers, c => Math.max(0, customerBalance(c.id)));
-    const pay = sum(db.suppliers, s => Math.max(0, supplierBalance(s.id)));
+    const pay = sum(db.suppliers, s => Math.max(0, supplierBalance(s.id))) + sum(db.customers, c => Math.max(0, -customerBalance(c.id)));
     const low = db.products.filter(p => p.qty <= (p.minQty || 0));
     const hasData = db.sales.length + db.products.length > 0;
     const needBackup = hasData && (!db.settings.lastBackup || (Date.now() - new Date(db.settings.lastBackup).getTime()) > 7 * 864e5);
@@ -546,7 +558,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <div class="stat"><div class="l">مبيعات الشهر</div><div class="v">${money(mon.revenue)}</div></div>
         <div class="stat ${mon.net >= 0 ? 'good' : 'bad'}"><div class="l">صافي ربح الشهر</div><div class="v">${money(mon.net)}</div></div>
         <div class="stat warn"><div class="l">ديون لنا (على الزبائن)</div><div class="v">${money(recv)}</div></div>
-        <div class="stat bad"><div class="l">ديون علينا (للموردين)</div><div class="v">${money(pay)}</div></div>
+        <div class="stat bad"><div class="l">ديون علينا (للموردين والعملاء)</div><div class="v">${money(pay)}</div></div>
         <div class="stat"><div class="l">مصاريف اليوم</div><div class="v">${money(day.expenses)}</div></div>
         <div class="stat ${low.length ? 'bad' : ''}"><div class="l">منتجات قاربت على النفاد</div><div class="v">${num(low.length)}</div></div>
       </div>
@@ -639,6 +651,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         </label>
         <label class="field" style="margin:0"><span>التاريخ</span><input type="date" class="input" value="${ed.date}" onchange="App.edField('date',this.value)"></label>
       </div>
+      ${edCreditHint()}
       <div class="section-title">المنتجات</div>
       <div class="list" id="edLines">${edLinesHTML()}</div>
       <button class="btn secondary block" onclick="App.picker()">+ إضافة منتج</button>
@@ -655,6 +668,17 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <button class="btn danger" style="flex:0 0 auto" onclick="App.edCancel()">إلغاء</button>
       </div>
     `);
+  }
+  function edCreditHint() {
+    if (!ed.partyId) return '';
+    const bal = partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId);
+    const credit = ed.kind === 'sale' ? -bal : bal;  // ما أنا مطلوب له
+    if (credit > 0 && ed.kind === 'sale') {
+      return `<div class="card" style="background:var(--blue-soft);color:var(--blue)">لهذا الزبون رصيد له: <b>${money(credit)}</b> (أنت مطلوب له).
+        ${ed.type === 'credit' && !toNum(ed.paid) ? '<br>✓ قيمة هذه الفاتورة ستُخصم من رصيده.' : `<br><button class="btn small" style="margin-top:8px" onclick="App.edUseCredit()">خصم الفاتورة من رصيده</button>`}</div>`;
+    }
+    if (bal > 0 && ed.kind === 'sale') return `<div class="card small" style="background:var(--amber-soft);color:var(--amber)">على هذا الزبون دين سابق: <b>${money(bal)}</b></div>`;
+    return '';
   }
   function stockOf(pid) { const p = byId(db.products, pid); return p ? p.qty : 0; }
   function edLinesHTML() {
@@ -675,7 +699,8 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       ${t.disc ? `<div class="tr"><span class="muted">الخصم</span><span>− ${money(t.disc)}</span></div>` : ''}
       <div class="tr big"><span>الإجمالي</span><span>${money(t.total)}</span></div>
       ${ed.type === 'credit' ? `<div class="tr"><span class="muted">المدفوع</span><span>${money(t.paid)}</span></div>
-      <div class="tr bold"><span>المتبقي ${ed.kind === 'sale' ? 'على الزبون' : 'للمورد'}</span><span class="neg">${money(t.rem)}</span></div>` : ''}`;
+      <div class="tr bold"><span>${ed.kind === 'sale' ? 'يضاف إلى حساب الزبون' : 'يضاف إلى حساب المورد'}</span><span class="neg">${money(t.rem)}</span></div>
+      ${ed.partyId ? `<div class="tr small"><span class="muted">رصيده بعد الفاتورة</span><span>${balWord(ed.kind === 'sale' ? 'customer' : 'supplier', partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId) + t.rem)}</span></div>` : ''}` : ''}`;
   }
   function edRefresh(lines) {
     if (lines) $('#edLines').innerHTML = edLinesHTML();
@@ -982,12 +1007,16 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const P = PARTY[kind];
     setTop(P.many, plusBtn(`App.partyForm('${kind}')`));
     const all = P.list().map(c => ({ c, bal: partyBalance(kind, c.id) }));
-    const total = sum(all, x => Math.max(0, x.bal));
+    const mine = sum(all, x => kind === 'customer' ? Math.max(0, x.bal) : Math.max(0, -x.bal));
+    const theirs = sum(all, x => kind === 'customer' ? Math.max(0, -x.bal) : Math.max(0, x.bal));
     let list = all;
     if (partyQuery.trim()) list = list.filter(x => x.c.name.includes(partyQuery.trim()) || (x.c.phone || '').includes(partyQuery.trim()));
     list.sort((a, b) => b.bal - a.bal || a.c.name.localeCompare(b.c.name, 'ar'));
     V(`
-      <div class="stats"><div class="stat wide ${kind === 'customer' ? 'warn' : 'bad'}"><div class="l">${kind === 'customer' ? 'مجموع الديون على الزبائن' : 'مجموع ديوننا للموردين'}</div><div class="v">${money(total)}</div></div></div>
+      <div class="stats">
+        <div class="stat warn"><div class="l">مطلوب لي (عليهم)</div><div class="v">${money(mine)}</div></div>
+        <div class="stat bad"><div class="l">أنا مطلوب (لهم)</div><div class="v">${money(theirs)}</div></div>
+      </div>
       <div class="btn-row" style="margin:0 0 12px">
         <button class="btn" onclick="App.partyForm('${kind}')">+ ${P.one} جديد</button>
         <button class="btn secondary" onclick="App.paymentForm('${kind}')">${kind === 'customer' ? 'قبض دفعة' : 'تسديد دفعة'}</button>
@@ -995,7 +1024,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="search"><input class="input" placeholder="بحث بالاسم أو الهاتف" value="${esc(partyQuery)}" oninput="App.partySearch('${kind}',this.value)"></div>
       ${list.length ? `<div class="list">${list.map(({ c, bal }) => `<div class="row" onclick="App.showParty('${kind}','${c.id}')">
         <div class="grow"><div class="t">${esc(c.name)}</div><div class="s">${esc(digits(c.phone || ''))}</div></div>
-        <div class="end">${bal > 0 ? `<span class="badge ${kind === 'customer' ? 'b-amber' : 'b-red'}">${money(bal)}</span>` : bal < 0 ? `<span class="badge b-blue">رصيد له ${money(-bal)}</span>` : '<span class="badge b-green">لا يوجد دين</span>'}</div>
+        <div class="end">${balBadge(kind, bal)}</div>
         <span class="chev">‹</span></div>`).join('')}</div>` : `<div class="card empty">لا يوجد ${P.many}</div>`}
     `);
   }
@@ -1006,22 +1035,30 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <label class="field"><span>الاسم *</span><input class="input" id="cName" value="${esc(c ? c.name : '')}"></label>
       <label class="field"><span>رقم الهاتف</span><input class="input" id="cPhone" type="tel" inputmode="tel" value="${esc(c ? c.phone : '')}" placeholder="07xxxxxxxxx"></label>
       <label class="field"><span>العنوان / ملاحظات</span><input class="input" id="cNotes" value="${esc(c ? c.notes : '')}"></label>
-      ${!c ? `<label class="field"><span>دين سابق (رصيد افتتاحي)</span><input class="input money" inputmode="numeric" id="cOpen" placeholder="0"></label>` : ''}
+      <div class="card">
+        <div class="bold" style="margin-bottom:8px">الرصيد الافتتاحي (الحساب القديم قبل البرنامج)</div>
+        <div class="seg" id="cDirSeg">
+          <button type="button" data-dir="me" class="${!c || (Number(c.opening) || 0) * (kind === 'customer' ? 1 : -1) >= 0 ? 'on' : ''}" onclick="App.setDir(this)">${kind === 'customer' ? 'عليه (مطلوب لي)' : 'عليه (مطلوب لي)'}</button>
+          <button type="button" data-dir="them" class="${c && (Number(c.opening) || 0) * (kind === 'customer' ? 1 : -1) < 0 ? 'on' : ''}" onclick="App.setDir(this)">له (أنا مطلوب له)</button>
+        </div>
+        <label class="field" style="margin:0"><span>المبلغ</span><input class="input money" inputmode="numeric" id="cOpen" placeholder="0" value="${fmtIn(c ? Math.abs(Number(c.opening) || 0) : 0)}"></label>
+        <div class="small muted" style="margin-top:8px">${kind === 'customer' ? 'إذا كنت مطلوباً للزبون اختر «له»، وعند بيعه بضاعة بالآجل تُخصم قيمتها من رصيده تلقائياً.' : 'إذا كنت مطلوباً للمورد اختر «له».'}</div>
+      </div>
       <button class="btn block" id="cSave">حفظ</button>
     `);
     setTimeout(() => { const el = $('#cName'); if (el && !c) el.focus(); }, 250);
     $('#cSave').onclick = () => {
       const name = val('cName'); if (!name) return toast('اكتب الاسم');
       let rec;
-      if (c) { Object.assign(c, { name, phone: val('cPhone'), notes: val('cNotes') }); rec = c; }
+      const amt = Math.abs(Math.round(nval('cOpen')));
+      const dirBtn = document.querySelector('#cDirSeg .on');
+      const owesMe = !dirBtn || dirBtn.dataset.dir === 'me';
+      // العميل: موجب = عليه. المورد: موجب = له (أنا مطلوب)
+      const opening = (kind === 'customer') === owesMe ? amt : -amt;
+      if (c) { Object.assign(c, { name, phone: val('cPhone'), notes: val('cNotes'), opening }); rec = c; }
       else {
-        rec = { id: uid(), name, phone: val('cPhone'), notes: val('cNotes'), createdAt: today() };
+        rec = { id: uid(), name, phone: val('cPhone'), notes: val('cNotes'), opening, openingDate: today(), createdAt: today() };
         P.list().push(rec);
-        const open = Math.round(nval('cOpen'));
-        if (open > 0) {
-          const doc = { id: uid(), no: ++db.seq[P.invKind], date: today(), type: 'credit', items: [], discount: 0, total: open, paid: 0, note: 'رصيد افتتاحي (دين سابق)', createdAt: new Date().toISOString() };
-          if (kind === 'customer') { doc.customerId = rec.id; db.sales.push(doc); } else { doc.supplierId = rec.id; db.purchases.push(doc); }
-        }
       }
       save(); closeSheet(); toast('تم الحفظ');
       if (onSaved) onSaved(rec); else render();
@@ -1034,13 +1071,17 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const pays = P.pay().filter(p => p.partyId === id);
     const bal = partyBalance(kind, id);
     const rows = [
-      ...invs.map(s => ({ date: s.date, ts: s.createdAt || '', html: `<div class="row" onclick="App.showInvoice('${P.invKind}','${s.id}')"><div class="grow"><div class="t">${s.items.length ? (kind === 'customer' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + num(s.no) : esc(s.note || 'رصيد افتتاحي')}</div><div class="s">${fmtDate(s.date)} · ${s.type === 'credit' ? 'آجل' : 'نقدي'}</div></div><div class="end"><div>${money(s.total)}</div>${s.total - s.paid > 0 ? `<div class="small neg">باقي ${money(s.total - s.paid)}</div>` : ''}</div></div>` })),
+      ...invs.map(s => ({ date: s.date, ts: s.createdAt || '', html: `<div class="row" onclick="App.showInvoice('${P.invKind}','${s.id}')"><div class="grow"><div class="t">${s.items.length ? (kind === 'customer' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + num(s.no) : esc(s.note || 'رصيد افتتاحي')}</div><div class="s">${fmtDate(s.date)} · ${s.type === 'credit' ? 'آجل' : 'نقدي'}</div></div><div class="end"><div>${money(s.total)}</div>${s.total - s.paid > 0 ? `<div class="small muted">على الحساب ${money(s.total - s.paid)}</div>` : ''}</div></div>` })),
       ...pays.map(p => ({ date: p.date, ts: p.createdAt || '', html: `<div class="row" onclick="App.deletePayment('${kind}','${p.id}')"><div class="grow"><div class="t pos">${kind === 'customer' ? 'دفعة مقبوضة' : 'دفعة مسددة'}</div><div class="s">${fmtDate(p.date)}${p.note ? ' · ' + esc(p.note) : ''}</div></div><div class="end pos bold">${money(p.amount)}</div></div>` }))
     ].sort((a, b) => (b.date + b.ts).localeCompare(a.date + a.ts));
+    const op = Number(c.opening) || 0;
+    if (op) rows.push({ html: `<div class="row" onclick="App.partyForm('${kind}','${id}')"><div class="grow"><div class="t">رصيد افتتاحي</div><div class="s">${fmtDate(c.openingDate || c.createdAt)} · اضغط للتعديل</div></div><div class="end">${balBadge(kind, op)}</div></div>` });
     const totalInv = sum(invs, s => s.total);
+    const owesMe = kind === 'customer' ? bal > 0 : bal < 0;
     openSheet(c.name, `
       <div class="stats">
-        <div class="stat wide ${bal > 0 ? (kind === 'customer' ? 'warn' : 'bad') : 'good'}"><div class="l">${bal >= 0 ? (kind === 'customer' ? 'الدين المتبقي على الزبون' : 'المتبقي للمورد') : 'رصيد دائن'}</div><div class="v">${money(Math.abs(bal))}</div></div>
+        <div class="stat wide ${!Math.round(bal) ? 'good' : owesMe ? 'warn' : 'bad'}"><div class="l">${!Math.round(bal) ? 'الحساب مسدد' : owesMe ? 'الرصيد: عليه (مطلوب لي)' : 'الرصيد: له (أنا مطلوب له)'}</div><div class="v">${money(Math.abs(bal))}</div>
+        ${!owesMe && Math.round(bal) && kind === 'customer' ? '<div class="small muted">يُسدد من البضاعة: عند بيعه بالآجل تُخصم القيمة من رصيده.</div>' : ''}</div>
         <div class="stat"><div class="l">${kind === 'customer' ? 'إجمالي المشتريات' : 'إجمالي التوريد'}</div><div class="v">${money(totalInv)}</div></div>
         <div class="stat"><div class="l">عدد الفواتير</div><div class="v">${num(invs.filter(s => s.items.length).length)}</div></div>
       </div>
@@ -1061,9 +1102,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const P = PARTY[kind]; const c = byId(P.list(), id);
     const invs = P.invoices(id); const pays = P.pay().filter(p => p.partyId === id);
     const lines = [db.settings.shopName, 'كشف حساب: ' + c.name, 'بتاريخ ' + fmtDate(today()), ''];
+    if (Number(c.opening)) lines.push('رصيد افتتاحي: ' + balWord(kind, Number(c.opening)));
     invs.slice(-15).forEach(s => lines.push(`${fmtDate(s.date)}  ${s.items.length ? 'فاتورة #' + num(s.no) : (s.note || 'رصيد سابق')}: ${money(s.total)}${s.paid ? ' (مدفوع ' + money(s.paid) + ')' : ''}`));
     pays.slice(-15).forEach(p => lines.push(`${fmtDate(p.date)}  دفعة: ${money(p.amount)}`));
-    lines.push('', 'الرصيد المتبقي: ' + money(partyBalance(kind, id)));
+    lines.push('', 'الرصيد: ' + balWord(kind, partyBalance(kind, id)));
     shareText(lines.join('\n'), 'كشف حساب');
   }
   async function deleteParty(kind, id) {
@@ -1080,7 +1122,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const opts = list.map(c => ({ c, b: partyBalance(kind, c.id) })).sort((a, b) => b.b - a.b);
     openSheet(P.payVerb, `
       <label class="field"><span>${P.one === 'زبون' ? 'الزبون' : 'المورد'}</span>
-        <select class="input" id="payParty" onchange="App.payHint('${kind}')">${opts.map(({ c, b }) => `<option value="${c.id}" ${c.id === partyId ? 'selected' : ''}>${esc(c.name)} — ${money(b)}</option>`).join('')}</select></label>
+        <select class="input" id="payParty" onchange="App.payHint('${kind}')">${opts.map(({ c, b }) => `<option value="${c.id}" ${c.id === partyId ? 'selected' : ''}>${esc(c.name)} — ${balWord(kind, b)}</option>`).join('')}</select></label>
       <div class="card small" id="payHint"></div>
       <label class="field"><span>المبلغ *</span><input class="input money" inputmode="numeric" id="payAmt" placeholder="0"></label>
       <label class="field"><span>التاريخ</span><input type="date" class="input" id="payDate" value="${today()}"></label>
@@ -1091,7 +1133,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   }
   function payHint(kind) {
     const id = val('payParty'); const b = partyBalance(kind, id);
-    $('#payHint').innerHTML = `الرصيد الحالي: <b>${money(b)}</b> ${b > 0 ? `<button class="link-btn" onclick="document.getElementById('payAmt').value='${fmtIn(b)}'">تسديد الكل</button>` : ''}`;
+    $('#payHint').innerHTML = `الرصيد الحالي: <b>${balWord(kind, b)}</b> ${b > 0 ? `<button class="link-btn" onclick="document.getElementById('payAmt').value='${fmtIn(b)}'">تسديد الكل</button>` : ''}`;
   }
   function savePayment(kind) {
     const amount = Math.round(nval('payAmt'));
@@ -1468,19 +1510,22 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         return { c, count: inv.length, buy: sum(inv, s => s.total), paid: sum(inv, s => s.paid) + sum(pays, p => p.amount), bal: customerBalance(c.id), last };
       });
       const cashSales = db.sales.filter(s => !s.customerId && inR(s.date));
-      const active = rows.filter(r => r.count || r.bal).sort((a, b) => b.buy - a.buy);
+      const active = rows.filter(r => r.count || Math.round(r.bal)).sort((a, b) => b.buy - a.buy);
       const debtors = rows.filter(r => r.bal > 0).sort((a, b) => b.bal - a.bal);
+      const creditors = rows.filter(r => r.bal < 0).sort((a, b) => a.bal - b.bal);
       return period + `
         <div class="stats">
           <div class="stat"><div class="l">عدد العملاء</div><div class="v">${num(db.customers.length)}</div></div>
           <div class="stat"><div class="l">اشتروا في الفترة</div><div class="v">${num(rows.filter(r => r.count).length)}</div></div>
-          <div class="stat wide warn"><div class="l">مجموع الديون على العملاء (${num(debtors.length)} زبون)</div><div class="v">${money(sum(debtors, r => r.bal))}</div></div>
+          <div class="stat warn"><div class="l">عليهم - مطلوب لي (${num(debtors.length)})</div><div class="v">${money(sum(debtors, r => r.bal))}</div></div>
+          <div class="stat bad"><div class="l">لهم - أنا مطلوب (${num(creditors.length)})</div><div class="v">${money(-sum(creditors, r => r.bal))}</div></div>
         </div>
         <div class="section-title">مشتريات العملاء في الفترة</div>
-        ${active.length || cashSales.length ? `<div class="table-wrap"><table><thead><tr><th>الزبون</th><th class="n">الفواتير</th><th class="n">المشتريات</th><th class="n">المدفوع</th><th class="n">الدين الكلي</th><th>آخر شراء</th></tr></thead>
-          <tbody>${active.map(r => `<tr onclick="App.showParty('customer','${r.c.id}')"><td>${esc(r.c.name)}</td><td class="n">${num(r.count)}</td><td class="n">${num(r.buy)}</td><td class="n">${num(r.paid)}</td><td class="n ${r.bal > 0 ? 'neg' : ''}">${num(r.bal)}</td><td>${fmtDate(r.last)}</td></tr>`).join('')}
+        ${active.length || cashSales.length ? `<div class="table-wrap"><table><thead><tr><th>الزبون</th><th class="n">الفواتير</th><th class="n">المشتريات</th><th class="n">المدفوع</th><th class="n">الرصيد الكلي</th><th>آخر شراء</th></tr></thead>
+          <tbody>${active.map(r => `<tr onclick="App.showParty('customer','${r.c.id}')"><td>${esc(r.c.name)}</td><td class="n">${num(r.count)}</td><td class="n">${num(r.buy)}</td><td class="n">${num(r.paid)}</td><td class="n ${r.bal > 0 ? 'neg' : ''}">${balWord('customer', r.bal)}</td><td>${fmtDate(r.last)}</td></tr>`).join('')}
           ${cashSales.length ? `<tr><td class="muted">زبائن نقديون</td><td class="n">${num(cashSales.length)}</td><td class="n">${num(sum(cashSales, s => s.total))}</td><td class="n">${num(sum(cashSales, s => s.paid))}</td><td class="n">—</td><td></td></tr>` : ''}</tbody></table></div>` : empty}
-        ${debtors.length ? `<div class="section-title">العملاء المدينون</div><div class="list">${debtors.map(r => `<div class="row" onclick="App.showParty('customer','${r.c.id}')"><div class="grow"><div class="t">${esc(r.c.name)}</div><div class="s">${esc(digits(r.c.phone || ''))}${r.last ? ' · آخر شراء ' + fmtDate(r.last) : ''}</div></div><div class="end bold neg">${money(r.bal)}</div></div>`).join('')}</div>` : ''}`;
+        ${debtors.length ? `<div class="section-title">العملاء المدينون</div><div class="list">${debtors.map(r => `<div class="row" onclick="App.showParty('customer','${r.c.id}')"><div class="grow"><div class="t">${esc(r.c.name)}</div><div class="s">${esc(digits(r.c.phone || ''))}${r.last ? ' · آخر شراء ' + fmtDate(r.last) : ''}</div></div><div class="end bold neg">${money(r.bal)}</div></div>`).join('')}</div>` : ''}
+        ${creditors.length ? `<div class="section-title">عملاء لهم رصيد (أنا مطلوب لهم)</div><div class="list">${creditors.map(r => `<div class="row" onclick="App.showParty('customer','${r.c.id}')"><div class="grow"><div class="t">${esc(r.c.name)}</div><div class="s">${esc(digits(r.c.phone || ''))}</div></div><div class="end bold" style="color:var(--blue)">${money(-r.bal)}</div></div>`).join('')}</div>` : ''}`;
     }
 
     if (rp.tab === 'stock') {
@@ -1675,7 +1720,9 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     printReport, reportPDF, saveSettings, exportData, importData, importText, resetAll, loadDemo, picker,
     newInvoice(kind) { ed = newEd(kind); if (location.hash === '#' + kind + '-new') render(); else go(kind + '-new'); },
     edType(t) { ed.type = t; if (t === 'cash') ed.paid = 0; render(); },
-    edField(k, v) { ed[k] = v; if (k === 'discount' || k === 'paid') edRefresh(false); },
+    edField(k, v) { ed[k] = v; if (k === 'partyId') render(); else if (k === 'discount' || k === 'paid') edRefresh(false); },
+    edUseCredit() { ed.type = 'credit'; ed.paid = 0; render(); },
+    setDir(btn) { btn.parentNode.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === btn)); },
     edLine(i, k, v) { ed.lines[i][k] = toNum(v); edRefresh(false); },
     edStep(i, d) { const l = ed.lines[i]; l.qty = Math.max(0, round3(l.qty + d)); if (l.qty === 0) ed.lines.splice(i, 1); edRefresh(true); },
     edDel(i) { ed.lines.splice(i, 1); edRefresh(true); },
