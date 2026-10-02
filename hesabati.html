@@ -336,7 +336,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '1.7';
+  const APP_VERSION = '1.9';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -344,11 +344,11 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   /* ---------- Data ---------- */
   function defaults() {
     return {
-      settings: { shopName: 'متجري', shopPhone: '', currency: 'د.ع', arabicDigits: false, openingCash: 0, lastBackup: '', invoiceTemplate: true },
+      settings: { shopName: 'متجري', shopPhone: '', currency: 'د.ع', arabicDigits: false, openingCash: 0, lastBackup: '', invoiceTemplate: true, owners: [] },
       products: [], customers: [], suppliers: [],
       sales: [], purchases: [], expenses: [],
       payments: [], supplierPayments: [],
-      employees: [], advances: [], payrolls: [],
+      employees: [], advances: [], payrolls: [], workLogs: [], withdrawals: [],
       seq: { sale: 0, purchase: 0 }
     };
   }
@@ -476,12 +476,22 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   const advBalance = empId =>
     sum(db.advances.filter(a => a.employeeId === empId), a => a.amount) - sum(db.payrolls.filter(p => p.employeeId === empId), p => p.advDeducted);
   const payrollCost = p => p.base + p.bonus - p.deduction;
+  // راتب الإنجاز المرتبط بمنتج يدخل ضمن كلفة البضاعة، فلا يُحسب مرة ثانية كمصروف رواتب
+  const payrollExpense = p => p.inCost ? p.bonus - p.deduction : payrollCost(p);
+  const isPiece = e => e && e.payType === 'piece';
+  const monthLogs = (empId, month) => db.workLogs.filter(w => w.employeeId === empId && w.date.startsWith(month));
+  const monthQty = (empId, month) => sum(monthLogs(empId, month), w => w.qty);
+  const monthPieceAmount = (empId, month) => sum(monthLogs(empId, month), w => w.qty * w.rate);
+  const expectedPay = (e, month) => isPiece(e) ? monthPieceAmount(e.id, month) : e.salary;
+  const unitName = e => (e && e.unitName) || 'قطعة';
+  const ownerName = id => { const o = byId(db.settings.owners, id); return o ? o.name : '—'; };
 
   function cashBox() {
     return (Number(db.settings.openingCash) || 0)
       + sum(db.sales, s => s.paid) + sum(db.payments, p => p.amount)
       - sum(db.purchases, s => s.paid) - sum(db.supplierPayments, p => p.amount)
-      - sum(db.expenses, e => e.amount) - sum(db.advances, a => a.amount) - sum(db.payrolls, p => p.net);
+      - sum(db.expenses, e => e.amount) - sum(db.advances, a => a.amount) - sum(db.payrolls, p => p.net)
+      - sum(db.withdrawals, w => w.amount);
   }
   function profitIn(from, to) {
     const inR = d => d >= from && d <= to;
@@ -489,7 +499,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const revenue = sum(sales, s => s.total);
     const cogs = sum(sales, lineCost);
     const expenses = sum(db.expenses.filter(e => inR(e.date)), e => e.amount);
-    const salaries = sum(db.payrolls.filter(p => inR(p.date)), payrollCost);
+    const salaries = sum(db.payrolls.filter(p => inR(p.date)), payrollExpense);
     return { revenue, cogs, gross: revenue - cogs, expenses, salaries, net: revenue - cogs - expenses - salaries, count: sales.length };
   }
 
@@ -556,12 +566,19 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const activeToday = db.sales.some(x => x.date === t) || db.expenses.some(x => x.date === t) || db.purchases.some(x => x.date === t);
     const needBackup = hasData && (!lastB || (activeToday && lastB < t) || (Date.now() - new Date(db.settings.lastBackup).getTime()) > 7 * 864e5);
     const recent = db.sales.slice(-5).reverse();
+    const cash = cashBox();
+    const stockValue = sum(db.products, p => Math.max(0, p.qty) * p.cost);
+    const worth = cash + stockValue + recv - pay;
 
     V(`
       <div class="hero">
-        <div class="l">مبيعات اليوم — ${fmtDate(t)}</div>
-        <div class="v">${money(day.revenue)}</div>
-        <div class="sub"><span>عدد الفواتير: ${num(day.count)}</span><span>ربح اليوم: ${money(day.net)}</span></div>
+        <div class="l">الرصيد</div>
+        <div class="v">${money(cash)}</div>
+        <div class="sub"><span>بضاعة بالمخزن: ${money(stockValue)}</span><span>صافي ما تملكه: ${money(worth)}</span></div>
+      </div>
+      <div class="stats">
+        <div class="stat"><div class="l">مبيعات اليوم (${num(day.count)} فاتورة)</div><div class="v">${money(day.revenue)}</div></div>
+        <div class="stat ${day.net >= 0 ? 'good' : 'bad'}"><div class="l">ربح اليوم</div><div class="v">${money(day.net)}</div></div>
       </div>
       <div class="actions">
         <button class="action" onclick="App.newInvoice('sale')"><span class="ai">🛒</span>بيع جديد</button>
@@ -570,10 +587,15 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <button class="action" onclick="App.paymentForm('customer')"><span class="ai">💰</span>قبض من زبون</button>
         <button class="action" onclick="App.advanceForm()"><span class="ai">🤝</span>سلفة موظف</button>
         <button class="action" onclick="App.go('payroll')"><span class="ai">👥</span>الرواتب</button>
+        <button class="action" onclick="App.workForm()"><span class="ai">✅</span>تسجيل إنجاز</button>
+        <button class="action" onclick="App.withdrawalForm()"><span class="ai">💼</span>سحب أرباح</button>
+        <button class="action" onclick="App.productForm()"><span class="ai">📦</span>منتج جديد</button>
       </div>
+      ${showInstallHint() ? `<div class="card" style="background:var(--blue-soft);color:var(--blue)"><b>ثبّت البرنامج على الشاشة الرئيسية:</b><br>
+        اضغط زر المشاركة <b>⬆︎</b> بأسفل سفاري ← <b>إضافة إلى الشاشة الرئيسية</b> ← <b>إضافة</b>.<br>
+        <span class="small">إذا عندك بيانات بالنسخة القديمة: خذ منها نسخة احتياطية، وبعدين هنا من الإعدادات ← استرجاع نسخة.</span></div>` : ''}
       ${needBackup ? `<div class="card" style="background:var(--amber-soft);color:var(--amber)"><b>تذكير:</b> ${activeToday ? 'لم تأخذ نسخة احتياطية لشغل اليوم.' : 'لم تأخذ نسخة احتياطية منذ أكثر من أسبوع.'} <a href="#settings" class="bold">خذ نسخة الآن</a></div>` : ''}
       <div class="stats">
-        <div class="stat wide"><div class="l">رصيد الصندوق (النقد المتوفر)</div><div class="v">${money(cashBox())}</div></div>
         <div class="stat"><div class="l">مبيعات الشهر</div><div class="v">${money(mon.revenue)}</div></div>
         <div class="stat ${mon.net >= 0 ? 'good' : 'bad'}"><div class="l">صافي ربح الشهر</div><div class="v">${money(mon.net)}</div></div>
         <div class="stat warn"><div class="l">ديون لنا (على الزبائن)</div><div class="v">${money(recv)}</div></div>
@@ -587,6 +609,13 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="section-title">آخر المبيعات</div>
       ${recent.length ? `<div class="list">${recent.map(saleRow).join('')}</div>` : `<div class="card empty">لا توجد مبيعات بعد. اضغط «بيع جديد» للبدء.${!db.products.length ? '<br><br><a href="#stock" class="bold">ابدأ بإضافة منتجاتك إلى المخزن</a>' : ''}</div>`}
     `);
+  }
+
+  // يظهر فقط عند فتح البرنامج من سفاري على الآيفون وقبل تثبيته
+  function showInstallHint() {
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const standalone = window.navigator.standalone === true || (window.matchMedia && matchMedia('(display-mode: standalone)').matches);
+    return ios && !standalone && !EMBED;
   }
 
   /* ---------- Sales / Purchases lists ---------- */
@@ -1418,7 +1447,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     V(`
       <div class="stats">
         <div class="stat"><div class="l">عدد الموظفين</div><div class="v">${num(act.length)}</div></div>
-        <div class="stat"><div class="l">مجموع الرواتب الشهرية</div><div class="v">${money(sum(act, e => e.salary))}</div></div>
+        <div class="stat"><div class="l">رواتب هذا الشهر (المتوقعة)</div><div class="v">${money(sum(act, e => expectedPay(e, thisMonth())))}</div></div>
       </div>
       <div class="btn-row" style="margin:0 0 12px">
         <button class="btn" onclick="App.employeeForm()">+ موظف جديد</button>
@@ -1427,11 +1456,12 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       ${db.employees.length ? `<div class="list">${db.employees.map(e => {
         const adv = advBalance(e.id);
         return `<div class="row" onclick="App.showEmployee('${e.id}')"><div class="grow"><div class="t">${esc(e.name)} ${e.active === false ? '<span class="badge b-gray">متوقف</span>' : ''}</div>
-        <div class="s">${esc(e.job || '')}${e.job ? ' · ' : ''}الراتب ${money(e.salary)}</div></div>
+        <div class="s">${esc(e.job || '')}${e.job ? ' · ' : ''}${isPiece(e) ? `${money(e.rate)} لكل ${esc(unitName(e))} · منجز هذا الشهر ${num(monthQty(e.id, thisMonth()))}` : 'الراتب ' + money(e.salary)}</div></div>
         <div class="end">${adv > 0 ? `<span class="badge b-amber">سلف ${money(adv)}</span>` : ''}</div><span class="chev">‹</span></div>`;
       }).join('')}</div>` : '<div class="card empty">لا يوجد موظفون. أضف موظفيك لترتيب صرف رواتبهم.</div>'}
       <div class="card small muted"><b>طريقة صرف الرواتب:</b><br>
-      ١. أضف الموظف مع راتبه الشهري.<br>
+      ١. أضف الموظف: براتب شهري ثابت، أو <b>حسب الإنجاز</b> (مثلاً ٢٠٠ دينار لكل ايميل).<br>
+      ↩ لموظف الإنجاز سجّل عدد القطع المنجزة من «تسجيل إنجاز»، فتنضاف للمخزن وكلفتها تدخل بكلفة القطعة.<br>
       ٢. خلال الشهر سجّل أي <b>سلفة</b> يأخذها الموظف.<br>
       ٣. نهاية الشهر من «صرف الرواتب» اختر الشهر واضغط «صرف»؛ يحسب البرنامج: الراتب + المكافأة − الخصومات − السلف = <b>الصافي المستلم</b>.<br>
       ٤. تظهر الرواتب تلقائياً في تقرير الأرباح والمصاريف.</div>
@@ -1445,19 +1475,39 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <label class="field"><span>العمل / الوظيفة</span><input class="input" id="emJob" value="${esc(e ? e.job : '')}" placeholder="بائع، محاسب…"></label>
         <label class="field"><span>الهاتف</span><input class="input" id="emPhone" type="tel" inputmode="tel" value="${esc(e ? e.phone : '')}"></label>
       </div>
-      <div class="grid2">
-        <label class="field"><span>الراتب الشهري *</span><input class="input money" inputmode="numeric" id="emSal" value="${fmtIn(e ? e.salary : 0)}" placeholder="0"></label>
-        <label class="field"><span>تاريخ المباشرة</span><input type="date" class="input" id="emStart" value="${e ? e.startDate || '' : today()}"></label>
+      <div class="bold" style="margin:4px 4px 6px">طريقة حساب الراتب</div>
+      <div class="seg" id="emTypeSeg">
+        <button type="button" data-t="monthly" class="${!isPiece(e) ? 'on' : ''}" onclick="App.setPayType(this)">راتب شهري ثابت</button>
+        <button type="button" data-t="piece" class="${isPiece(e) ? 'on' : ''}" onclick="App.setPayType(this)">حسب الإنجاز (بالقطعة)</button>
       </div>
+      <div id="emMonthly" ${isPiece(e) ? 'hidden' : ''}>
+        <label class="field"><span>الراتب الشهري *</span><input class="input money" inputmode="numeric" id="emSal" value="${fmtIn(e ? e.salary : 0)}" placeholder="0"></label>
+      </div>
+      <div id="emPiece" ${isPiece(e) ? '' : 'hidden'}>
+        <div class="grid2">
+          <label class="field"><span>اسم العمل</span><input class="input" id="emUnit" value="${esc(e && e.unitName ? e.unitName : 'ايميل')}"></label>
+          <label class="field"><span>المبلغ لكل قطعة *</span><input class="input money" inputmode="numeric" id="emRate" value="${fmtIn(e ? e.rate : 200)}" placeholder="200"></label>
+        </div>
+        <label class="field"><span>المنتج اللي ينتجه (تنضاف القطع للمخزن وتدخل بكلفتها)</span>
+          <select class="input" id="emProduct"><option value="">بدون ربط بمنتج</option>
+          ${db.products.map(pr => `<option value="${pr.id}" ${e && e.productId === pr.id ? 'selected' : ''}>${esc(pr.name)}</option>`).join('')}</select></label>
+        <div class="card small muted">الراتب نهاية الشهر = عدد القطع المنجزة × المبلغ لكل قطعة. وإذا ربطته بمنتج، المبلغ يدخل ضمن كلفة القطعة بالمخزن ولا يُحسب مرتين بالأرباح.</div>
+      </div>
+      <label class="field"><span>تاريخ المباشرة</span><input type="date" class="input" id="emStart" value="${e ? e.startDate || '' : today()}"></label>
       ${e ? `<label class="field" style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="emActive" ${e.active !== false ? 'checked' : ''} style="width:22px;height:22px"> <span style="margin:0">الموظف على رأس العمل</span></label>` : ''}
       <button class="btn block" onclick="App.saveEmployee('${e ? e.id : ''}')">حفظ</button>
       ${e ? `<div class="btn-row"><button class="btn danger" onclick="App.deleteEmployee('${e.id}')">حذف الموظف</button></div>` : ''}
     `);
   }
   function saveEmployee(id) {
-    const name = val('emName'); const salary = Math.round(nval('emSal'));
+    const name = val('emName');
     if (!name) return toast('اكتب اسم الموظف');
-    const data = { name, job: val('emJob'), phone: val('emPhone'), salary, startDate: val('emStart') };
+    const piece = (document.querySelector('#emTypeSeg .on') || {}).dataset.t === 'piece';
+    const data = { name, job: val('emJob'), phone: val('emPhone'), startDate: val('emStart'), payType: piece ? 'piece' : 'monthly' };
+    if (piece) {
+      Object.assign(data, { salary: 0, rate: Math.round(nval('emRate')), unitName: val('emUnit') || 'قطعة', productId: val('emProduct') });
+      if (!data.rate) return toast('اكتب المبلغ لكل قطعة');
+    } else data.salary = Math.round(nval('emSal'));
     if (id) { const e = byId(db.employees, id); Object.assign(e, data); e.active = $('#emActive').checked; }
     else db.employees.push(Object.assign({ id: uid(), active: true }, data));
     save(); closeSheet(); toast('تم الحفظ'); render();
@@ -1473,22 +1523,69 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const e = byId(db.employees, id); if (!e) return;
     const adv = advBalance(id);
     const items = [
+      ...db.workLogs.filter(w => w.employeeId === id).map(w => ({ d: w.date, html: `<div class="row" onclick="App.deleteWork('${w.id}')"><div class="grow"><div class="t">إنجاز ${num(w.qty)} ${esc(unitName(e))}</div><div class="s">${fmtDate(w.date)} · ${money(w.rate)} للقطعة${w.note ? ' · ' + esc(w.note) : ''}</div></div><div class="end bold" style="color:var(--blue)">${money(w.qty * w.rate)}</div></div>` })),
       ...db.advances.filter(a => a.employeeId === id).map(a => ({ d: a.date, html: `<div class="row" onclick="App.deleteAdvance('${a.id}')"><div class="grow"><div class="t">سلفة</div><div class="s">${fmtDate(a.date)}${a.note ? ' · ' + esc(a.note) : ''}</div></div><div class="end bold" style="color:var(--amber)">${money(a.amount)}</div></div>` })),
       ...db.payrolls.filter(p => p.employeeId === id).map(p => ({ d: p.date, html: `<div class="row" onclick="App.showPayslip('${p.id}')"><div class="grow"><div class="t">راتب ${monthName(p.month)}</div><div class="s">صُرف ${fmtDate(p.date)}</div></div><div class="end bold pos">${money(p.net)}</div></div>` }))
     ].sort((a, b) => b.d.localeCompare(a.d));
     openSheet(e.name, `
       <div class="stats">
-        <div class="stat"><div class="l">الراتب الشهري</div><div class="v">${money(e.salary)}</div></div>
+        ${isPiece(e) ? `<div class="stat"><div class="l">منجز هذا الشهر (${money(e.rate)} لكل ${esc(unitName(e))})</div><div class="v">${num(monthQty(id, thisMonth()))} = ${money(monthPieceAmount(id, thisMonth()))}</div></div>`
+          : `<div class="stat"><div class="l">الراتب الشهري</div><div class="v">${money(e.salary)}</div></div>`}
         <div class="stat ${adv > 0 ? 'warn' : ''}"><div class="l">السلف غير المخصومة</div><div class="v">${money(adv)}</div></div>
       </div>
       <div class="btn-row">
         <button class="btn" onclick="App.payrollForm('${id}','${thisMonth()}')">صرف راتب</button>
         <button class="btn secondary" onclick="App.advanceForm('${id}')">تسجيل سلفة</button>
       </div>
+      ${isPiece(e) ? `<div class="btn-row"><button class="btn secondary" onclick="App.workForm('${id}')">✅ تسجيل إنجاز</button></div>` : ''}
       <div class="section-title">السجل</div>
       ${items.length ? `<div class="list">${items.map(x => x.html).join('')}</div>` : '<div class="card empty">لا توجد حركات</div>'}
       <div class="btn-row"><button class="btn secondary" onclick="App.employeeForm('${id}')">تعديل البيانات</button></div>
     `);
+  }
+  function workForm(empId) {
+    const list = db.employees.filter(e => e.active !== false && isPiece(e));
+    if (!list.length) return ask('ماكو موظف راتبه حسب الإنجاز. من «الموظفون» عدّل الموظف واختار «حسب الإنجاز».', { cancel: false });
+    openSheet('تسجيل إنجاز', `
+      <label class="field"><span>الموظف</span><select class="input" id="wEmp" onchange="App.workCalc()">${list.map(e => `<option value="${e.id}" ${e.id === empId ? 'selected' : ''}>${esc(e.name)} — ${money(e.rate)} لكل ${esc(unitName(e))}</option>`).join('')}</select></label>
+      <label class="field"><span>العدد المنجز *</span><input class="input qty" inputmode="numeric" id="wQty" placeholder="0" oninput="App.workCalc()"></label>
+      <label class="field"><span>التاريخ</span><input type="date" class="input" id="wDate" value="${today()}"></label>
+      <label class="field"><span>ملاحظة</span><input class="input" id="wNote"></label>
+      <div class="card totals" id="wCalc"></div>
+      <button class="btn block" onclick="App.saveWork()">حفظ</button>
+    `);
+    workCalc();
+  }
+  function workCalc() {
+    const e = byId(db.employees, val('wEmp')); if (!e) return;
+    const q = nval('wQty'); const pr = byId(db.products, e.productId);
+    $('#wCalc').innerHTML = `<div class="tr"><span class="muted">${num(q)} × ${money(e.rate)}</span><span class="bold">${money(q * e.rate)}</span></div>
+      <div class="tr small"><span class="muted">منجز هذا الشهر قبل هذا</span><span>${num(monthQty(e.id, thisMonth()))} ${esc(unitName(e))}</span></div>
+      ${pr ? `<div class="tr small"><span class="muted">يضاف للمخزن</span><span>${esc(pr.name)} (+${num(q)})</span></div>` : ''}`;
+  }
+  function addWork(e, qty, date, note) {
+    const pr = byId(db.products, e.productId);
+    const w = { id: uid(), employeeId: e.id, date, qty, rate: e.rate, productId: pr ? pr.id : '', note };
+    if (pr) {
+      // كلفة القطعة = متوسط مرجّح يشمل أجرة الموظف
+      const oldQ = Math.max(0, pr.qty);
+      pr.cost = oldQ > 0 ? Math.round((oldQ * pr.cost + qty * e.rate) / (oldQ + qty)) : e.rate;
+      pr.qty = round3(pr.qty + qty);
+    }
+    db.workLogs.push(w);
+    return w;
+  }
+  function saveWork() {
+    const e = byId(db.employees, val('wEmp')); const qty = round3(nval('wQty'));
+    if (!e) return; if (qty <= 0) return toast('اكتب العدد المنجز');
+    addWork(e, qty, val('wDate') || today(), val('wNote'));
+    save(); closeSheet(); toast('تم تسجيل الإنجاز'); render();
+  }
+  async function deleteWork(id) {
+    const w = byId(db.workLogs, id); if (!w) return;
+    if (!(await ask('حذف هذا الإنجاز (' + num(w.qty) + ')؟' + (w.productId ? '\nسيتم إنقاص الكمية من المخزن.' : '')))) return;
+    const pr = byId(db.products, w.productId); if (pr) pr.qty = round3(pr.qty - w.qty);
+    db.workLogs = db.workLogs.filter(x => x.id !== id); save(); closeSheet(); render();
   }
   function advanceForm(empId) {
     const act = db.employees.filter(e => e.active !== false);
@@ -1523,14 +1620,14 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <label class="field"><span>الشهر</span><input type="month" class="input" value="${payMonth}" onchange="App.setPayMonth(this.value)"></label>
       <div class="stats">
         <div class="stat good"><div class="l">المصروف لشهر ${monthName(payMonth)}</div><div class="v">${money(sum(paid, p => p.net))}</div></div>
-        <div class="stat warn"><div class="l">المتبقي (${num(unpaid.length)} موظف)</div><div class="v">${money(sum(unpaid, e => Math.max(0, e.salary - advBalance(e.id))))}</div></div>
+        <div class="stat warn"><div class="l">المتبقي (${num(unpaid.length)} موظف)</div><div class="v">${money(sum(unpaid, e => Math.max(0, expectedPay(e, payMonth) - advBalance(e.id))))}</div></div>
       </div>
       ${unpaid.length > 1 ? `<button class="btn block" style="margin-bottom:12px" onclick="App.payAll()">صرف رواتب الجميع (${num(unpaid.length)})</button>` : ''}
       ${act.length ? `<div class="list">${act.map(e => {
         const p = paid.find(x => x.employeeId === e.id);
         const adv = advBalance(e.id);
         return `<div class="row" onclick="${p ? `App.showPayslip('${p.id}')` : `App.payrollForm('${e.id}','${payMonth}')`}">
-          <div class="grow"><div class="t">${esc(e.name)}</div><div class="s">الراتب ${money(e.salary)}${adv > 0 ? ' · سلف ' + money(adv) : ''}</div></div>
+          <div class="grow"><div class="t">${esc(e.name)}</div><div class="s">${isPiece(e) ? `منجز ${num(monthQty(e.id, payMonth))} ${esc(unitName(e))} × ${money(e.rate)} = ${money(monthPieceAmount(e.id, payMonth))}` : 'الراتب ' + money(e.salary)}${adv > 0 ? ' · سلف ' + money(adv) : ''}</div></div>
           <div class="end">${p ? `<span class="badge b-green">✓ صُرف ${money(p.net)}</span>` : '<span class="badge b-blue">صرف</span>'}</div></div>`;
       }).join('')}</div>` : '<div class="card empty">لا يوجد موظفون. <a href="#employees">أضف موظفاً</a></div>'}
     `);
@@ -1539,14 +1636,18 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const e = byId(db.employees, empId); if (!e) return;
     if (db.payrolls.some(p => p.employeeId === empId && p.month === month) && !(await ask('تم صرف راتب ' + monthName(month) + ' لهذا الموظف سابقاً. صرف مرة أخرى؟'))) return;
     const adv = advBalance(empId);
+    const base0 = expectedPay(e, month);
     openSheet('صرف راتب: ' + e.name, `
-      <label class="field"><span>عن شهر</span><input type="month" class="input" id="prMonth" value="${month}"></label>
-      <label class="field"><span>الراتب الأساسي</span><input class="input money" inputmode="numeric" id="prBase" value="${fmtIn(e.salary)}" oninput="App.prCalc()"></label>
+      <label class="field"><span>عن شهر</span><input type="month" class="input" id="prMonth" value="${month}" ${isPiece(e) ? 'onchange="App.prMonthChange(\'' + empId + '\')"' : ''}></label>
+      ${isPiece(e) ? `<div class="grid2">
+        <label class="field"><span>العدد المنجز (${esc(unitName(e))})</span><input class="input qty" inputmode="numeric" id="prQty" value="${monthQty(empId, month)}" oninput="App.prCalc()" data-rate="${e.rate}" data-logged="${monthQty(empId, month)}"></label>
+        <label class="field"><span>المبلغ لكل قطعة</span><input class="input" readonly value="${money(e.rate)}"></label></div>` : ''}
+      <label class="field"><span>${isPiece(e) ? 'مبلغ الإنجاز' : 'الراتب الأساسي'}</span><input class="input money" inputmode="numeric" id="prBase" value="${fmtIn(base0)}" oninput="App.prCalc()" ${isPiece(e) ? 'readonly' : ''}></label>
       <div class="grid2">
         <label class="field"><span>مكافأة / إضافي</span><input class="input money" inputmode="numeric" id="prBonus" placeholder="0" oninput="App.prCalc()"></label>
         <label class="field"><span>خصم (غياب/تأخير)</span><input class="input money" inputmode="numeric" id="prDed" placeholder="0" oninput="App.prCalc()"></label>
       </div>
-      <label class="field"><span>خصم السلف (رصيد السلف: ${money(adv)})</span><input class="input money" inputmode="numeric" id="prAdv" value="${fmtIn(Math.min(adv, e.salary))}" oninput="App.prCalc()"></label>
+      <label class="field"><span>خصم السلف (رصيد السلف: ${money(adv)})</span><input class="input money" inputmode="numeric" id="prAdv" value="${fmtIn(Math.min(adv, base0))}" oninput="App.prCalc()"></label>
       <label class="field"><span>تاريخ الصرف</span><input type="date" class="input" id="prDate" value="${today()}"></label>
       <label class="field"><span>ملاحظة</span><input class="input" id="prNote"></label>
       <div class="card totals" id="prTotals"></div>
@@ -1555,6 +1656,8 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     prCalc();
   }
   function prCalc() {
+    const qEl = $('#prQty');
+    if (qEl) $('#prBase').value = fmtIn(toNum(qEl.value) * Number(qEl.dataset.rate));
     const base = nval('prBase'), bonus = nval('prBonus'), ded = nval('prDed'), adv = nval('prAdv');
     const net = base + bonus - ded - adv;
     $('#prTotals').innerHTML = `
@@ -1568,16 +1671,28 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const net = base + bonus - deduction - advDeducted;
     if (advDeducted > advBalance(empId)) return toast('خصم السلف أكبر من رصيد السلف');
     if (net < 0) return toast('الصافي بالسالب، قلل خصم السلف');
+    const e = byId(db.employees, empId);
     const rec = { id: uid(), employeeId: empId, month: val('prMonth') || payMonth, base, bonus, deduction, advDeducted, net, date: val('prDate') || today(), note: val('prNote') };
+    if (isPiece(e)) {
+      const qEl = $('#prQty'); const qty = round3(toNum(qEl.value)); const logged = monthQty(empId, rec.month);
+      if (qty < logged) return toast('العدد أقل من المسجل (' + num(logged) + '). احذف الإنجاز الزائد من صفحة الموظف.');
+      // العدد الإضافي اللي انكتب عند الصرف يتسجل كإنجاز
+      if (qty > logged) addWork(e, round3(qty - logged), rec.date, 'أضيف عند صرف الراتب');
+      Object.assign(rec, { piece: true, qty, rate: e.rate, inCost: !!byId(db.products, e.productId) });
+    }
     db.payrolls.push(rec); save(); closeSheet(); toast('تم صرف الراتب'); render();
     setTimeout(() => showPayslip(rec.id), 50);
   }
   async function payAll() {
     const paidIds = db.payrolls.filter(p => p.month === payMonth).map(p => p.employeeId);
     const list = db.employees.filter(e => e.active !== false && !paidIds.includes(e.id));
-    const rows = list.map(e => { const adv = Math.min(advBalance(e.id), e.salary); return { e, adv, net: e.salary - adv }; });
+    const rows = list.map(e => { const base = expectedPay(e, payMonth); const adv = Math.min(advBalance(e.id), base); return { e, base, adv, net: base - adv }; });
     if (!(await ask(`صرف رواتب ${monthName(payMonth)} لـ ${list.length} موظف؟\nالمجموع الصافي: ${money(sum(rows, r => r.net))}\n(يتم خصم السلف تلقائياً، بدون مكافآت أو خصومات)`))) return;
-    rows.forEach(({ e, adv, net }) => db.payrolls.push({ id: uid(), employeeId: e.id, month: payMonth, base: e.salary, bonus: 0, deduction: 0, advDeducted: adv, net, date: today(), note: '' }));
+    rows.forEach(({ e, base, adv, net }) => {
+      const rec = { id: uid(), employeeId: e.id, month: payMonth, base, bonus: 0, deduction: 0, advDeducted: adv, net, date: today(), note: '' };
+      if (isPiece(e)) Object.assign(rec, { piece: true, qty: monthQty(e.id, payMonth), rate: e.rate, inCost: !!byId(db.products, e.productId) });
+      db.payrolls.push(rec);
+    });
     save(); render(); toast('تم صرف الرواتب');
   }
   function payslipHTML(p) {
@@ -1586,7 +1701,8 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="card">
         <div class="kv"><span class="k">الموظف</span><span class="v">${esc(e.name)}</span></div>
         <div class="kv"><span class="k">تاريخ الصرف</span><span class="v">${fmtDate(p.date)}</span></div>
-        <div class="kv"><span class="k">الراتب الأساسي</span><span class="v">${money(p.base)}</span></div>
+        ${p.piece ? `<div class="kv"><span class="k">العمل المنجز</span><span class="v">${num(p.qty)} ${esc(unitName(e))} × ${money(p.rate)}</span></div>` : ''}
+        <div class="kv"><span class="k">${p.piece ? 'مبلغ الإنجاز' : 'الراتب الأساسي'}</span><span class="v">${money(p.base)}</span></div>
         <div class="kv"><span class="k">المكافأة / الإضافي</span><span class="v pos">+ ${money(p.bonus)}</span></div>
         <div class="kv"><span class="k">الخصومات</span><span class="v neg">− ${money(p.deduction)}</span></div>
         <div class="kv"><span class="k">السلف المخصومة</span><span class="v neg">− ${money(p.advDeducted)}</span></div>
@@ -1606,6 +1722,81 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     db.payrolls = db.payrolls.filter(p => p.id !== id); save(); closeSheet(); render();
   }
 
+  /* ---------- سحوبات أرباح المالكين ---------- */
+  function withdrawals() {
+    setTop('سحوبات الأرباح', plusBtn('App.withdrawalForm()'));
+    const all = profitIn('0000-01-01', '9999-12-31');
+    const totalW = sum(db.withdrawals, w => w.amount);
+    const m = thisMonth();
+    const list = db.withdrawals.slice().sort((a, b) => b.date.localeCompare(a.date));
+    V(`
+      <div class="stats">
+        <div class="stat good"><div class="l">صافي الأرباح (من البداية)</div><div class="v">${money(all.net)}</div></div>
+        <div class="stat bad"><div class="l">مجموع المسحوب</div><div class="v">${money(totalW)}</div></div>
+        <div class="stat wide ${all.net - totalW >= 0 ? '' : 'bad'}"><div class="l">أرباح متبقية غير مسحوبة</div><div class="v">${money(all.net - totalW)}</div></div>
+      </div>
+      <div class="btn-row" style="margin:0 0 12px">
+        <button class="btn" onclick="App.withdrawalForm()">+ سحب أرباح</button>
+        <button class="btn secondary" onclick="App.ownerForm()">+ مالك</button>
+      </div>
+      <div class="section-title">المالكون</div>
+      ${db.settings.owners.length ? `<div class="list">${db.settings.owners.map(o => {
+        const w = sum(db.withdrawals.filter(x => x.ownerId === o.id), x => x.amount);
+        const share = o.share ? all.net * o.share / 100 : null;
+        return `<div class="row" onclick="App.ownerForm('${o.id}')"><div class="grow"><div class="t">${esc(o.name)}${o.share ? ` <span class="badge b-blue">${num(o.share)}٪</span>` : ''}</div>
+          <div class="s">سحب ${money(w)}${share !== null ? ' · حصته ' + money(share) + ' · باقي له ' + money(share - w) : ''}</div></div>
+          <div class="end small muted">هذا الشهر<br><b>${money(sum(db.withdrawals.filter(x => x.ownerId === o.id && x.date.startsWith(m)), x => x.amount))}</b></div></div>`;
+      }).join('')}</div>` : '<div class="card empty">أضف المالكين أولاً (الاسم ونسبة الحصة).</div>'}
+      <div class="section-title">السحوبات</div>
+      ${list.length ? `<div class="list">${list.map(w => `<div class="row" onclick="App.deleteWithdrawal('${w.id}')"><div class="grow"><div class="t">${esc(ownerName(w.ownerId))}</div>
+        <div class="s">${fmtDate(w.date)}${w.note ? ' · ' + esc(w.note) : ''}</div></div><div class="end bold neg">${money(w.amount)}</div></div>`).join('')}</div>` : '<div class="card empty">لا توجد سحوبات بعد</div>'}
+      <div class="card small muted">سحب الأرباح ينقص من الرصيد (الصندوق)، لكنه ما يُحسب مصروف ولا ينقص من الأرباح. تقريره موجود بالتقارير ← السحوبات.</div>
+    `);
+  }
+  function ownerForm(id) {
+    const o = id ? byId(db.settings.owners, id) : null;
+    openSheet(o ? 'تعديل مالك' : 'مالك جديد', `
+      <label class="field"><span>اسم المالك *</span><input class="input" id="oName" value="${esc(o ? o.name : '')}"></label>
+      <label class="field"><span>نسبة الحصة من الأرباح ٪ (اختياري)</span><input class="input qty" inputmode="decimal" id="oShare" value="${o && o.share ? o.share : ''}" placeholder="مثلاً 50"></label>
+      <button class="btn block" onclick="App.saveOwner('${o ? o.id : ''}')">حفظ</button>
+      ${o ? `<div class="btn-row"><button class="btn danger" onclick="App.deleteOwner('${o.id}')">حذف المالك</button></div>` : ''}
+    `);
+  }
+  function saveOwner(id) {
+    const name = val('oName'); if (!name) return toast('اكتب اسم المالك');
+    const share = Math.max(0, Math.min(100, nval('oShare')));
+    if (id) Object.assign(byId(db.settings.owners, id), { name, share });
+    else db.settings.owners.push({ id: uid(), name, share });
+    save(); closeSheet(); toast('تم الحفظ'); render();
+  }
+  async function deleteOwner(id) {
+    if (db.withdrawals.some(w => w.ownerId === id)) return ask('لهذا المالك سحوبات مسجلة. احذف سحوباته أولاً.', { cancel: false });
+    if (!(await ask('حذف المالك؟'))) return;
+    db.settings.owners = db.settings.owners.filter(o => o.id !== id); save(); closeSheet(); render();
+  }
+  function withdrawalForm() {
+    if (!db.settings.owners.length) { toast('أضف المالك أولاً'); return ownerForm(); }
+    openSheet('سحب أرباح', `
+      <label class="field"><span>المالك</span><select class="input" id="wdOwner">${db.settings.owners.map(o => `<option value="${o.id}">${esc(o.name)}</option>`).join('')}</select></label>
+      <label class="field"><span>المبلغ *</span><input class="input money" inputmode="numeric" id="wdAmt" placeholder="0"></label>
+      <label class="field"><span>التاريخ</span><input type="date" class="input" id="wdDate" value="${today()}"></label>
+      <label class="field"><span>ملاحظة</span><input class="input" id="wdNote"></label>
+      <div class="card small muted">الرصيد الحالي: <b>${money(cashBox())}</b></div>
+      <button class="btn block" onclick="App.saveWithdrawal()">حفظ السحب</button>
+    `);
+  }
+  async function saveWithdrawal() {
+    const amount = Math.round(nval('wdAmt')); if (amount <= 0) return toast('اكتب المبلغ');
+    if (amount > cashBox() && !(await ask('المبلغ أكبر من الرصيد الموجود (' + money(cashBox()) + '). متابعة؟'))) return;
+    db.withdrawals.push({ id: uid(), ownerId: val('wdOwner'), amount, date: val('wdDate') || today(), note: val('wdNote') });
+    save(); closeSheet(); toast('تم تسجيل السحب'); render();
+  }
+  async function deleteWithdrawal(id) {
+    const w = byId(db.withdrawals, id); if (!w) return;
+    if (!(await ask('حذف هذا السحب (' + money(w.amount) + ')؟'))) return;
+    db.withdrawals = db.withdrawals.filter(x => x.id !== id); save(); render();
+  }
+
   /* ---------- Reports ---------- */
   const rp = { preset: 'month', from: '', to: '', tab: 'profit' };
   function rpRange() {
@@ -1621,7 +1812,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     setTop('التقارير', `<button class="link-btn" onclick="App.reportPDF()">PDF</button>`);
     if (!rp.from) { rp.from = thisMonth() + '-01'; rp.to = today(); }
     const presets = [['today', 'اليوم'], ['week', 'آخر ٧ أيام'], ['month', 'هذا الشهر'], ['last', 'الشهر الماضي'], ['year', 'هذه السنة'], ['custom', 'فترة محددة']];
-    const tabs = [['profit', 'الأرباح'], ['sales', 'المبيعات'], ['expenses', 'المصاريف'], ['customers', 'العملاء'], ['stock', 'المخزن'], ['salaries', 'الرواتب']];
+    const tabs = [['profit', 'الأرباح'], ['sales', 'المبيعات'], ['expenses', 'المصاريف'], ['customers', 'العملاء'], ['stock', 'المخزن'], ['salaries', 'الرواتب'], ['withdrawals', 'السحوبات']];
     V(`
       <div class="chips">${presets.map(([k, l]) => `<button class="chip ${rp.preset === k ? 'on' : ''}" onclick="App.rpSet('preset','${k}')">${l}</button>`).join('')}</div>
       ${rp.preset === 'custom' ? `<div class="grid2"><label class="field"><span>من</span><input type="date" class="input" value="${rp.from}" onchange="App.rpSet('from',this.value)"></label>
@@ -1656,6 +1847,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
           <div class="kv"><span class="k bold">مجمل الربح</span><span class="v">${money(r.gross)}</span></div>
           <div class="kv"><span class="k">المصاريف</span><span class="v neg">− ${money(r.expenses)}</span></div>
           <div class="kv"><span class="k">الرواتب</span><span class="v neg">− ${money(r.salaries)}</span></div>
+          ${db.payrolls.some(p => p.inCost && inR(p.date)) ? '<div class="small muted">رواتب الإنجاز المرتبطة بمنتج محسوبة ضمن كلفة البضاعة.</div>' : ''}
           <div class="kv total"><span class="k">صافي الربح</span><span class="v ${r.net >= 0 ? 'pos' : 'neg'}">${money(r.net)}</span></div>
           ${r.revenue ? `<div class="small muted" style="margin-top:6px">نسبة الربح الصافي من المبيعات: ${num((r.net / r.revenue * 100).toFixed(1))}٪</div>` : ''}
         </div>
@@ -1757,6 +1949,27 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
           <tfoot><tr><td colspan="5">المجموع</td><td class="n">${num(sum(ps, p => Math.max(0, p.qty) * p.cost))}</td></tr></tfoot></table></div>` : '<div class="card empty">المخزن فارغ</div>'}`;
     }
 
+    if (rp.tab === 'withdrawals') {
+      const r = profitIn(from, to);
+      const list = db.withdrawals.filter(w => inR(w.date)).sort((a, b) => a.date.localeCompare(b.date));
+      const total = sum(list, w => w.amount);
+      return period + `
+        <div class="card">
+          <div class="kv"><span class="k">صافي ربح الفترة</span><span class="v ${r.net >= 0 ? 'pos' : 'neg'}">${money(r.net)}</span></div>
+          <div class="kv"><span class="k">المسحوب بالفترة</span><span class="v neg">− ${money(total)}</span></div>
+          <div class="kv total"><span class="k">المتبقي من أرباح الفترة</span><span class="v">${money(r.net - total)}</span></div>
+        </div>
+        <div class="section-title">حسب المالك</div>
+        ${db.settings.owners.length ? `<div class="table-wrap"><table><thead><tr><th>المالك</th><th class="n">النسبة</th><th class="n">حصته من الربح</th><th class="n">المسحوب</th><th class="n">الباقي له</th></tr></thead>
+          <tbody>${db.settings.owners.map(o => { const w = sum(list.filter(x => x.ownerId === o.id), x => x.amount); const sh = o.share ? r.net * o.share / 100 : null;
+            return `<tr><td>${esc(o.name)}</td><td class="n">${o.share ? num(o.share) + '٪' : '—'}</td><td class="n">${sh !== null ? num(sh) : '—'}</td><td class="n">${num(w)}</td><td class="n">${sh !== null ? num(sh - w) : '—'}</td></tr>`; }).join('')}</tbody>
+          <tfoot><tr><td colspan="3">المجموع</td><td class="n">${num(total)}</td><td></td></tr></tfoot></table></div>` : empty}
+        <div class="section-title">تفاصيل السحوبات</div>
+        ${list.length ? `<div class="table-wrap"><table><thead><tr><th>التاريخ</th><th>المالك</th><th>ملاحظة</th><th class="n">المبلغ</th></tr></thead>
+          <tbody>${list.map(w => `<tr><td>${fmtDate(w.date)}</td><td>${esc(ownerName(w.ownerId))}</td><td>${esc(w.note || '')}</td><td class="n">${num(w.amount)}</td></tr>`).join('')}</tbody>
+          <tfoot><tr><td colspan="3">المجموع</td><td class="n">${num(total)}</td></tr></tfoot></table></div>` : empty}`;
+    }
+
     if (rp.tab === 'salaries') {
       const list = db.payrolls.filter(p => inR(p.date));
       const advs = db.advances.filter(a => inR(a.date));
@@ -1766,6 +1979,15 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
           <div class="stat"><div class="l">السلف المدفوعة بالفترة</div><div class="v">${money(sum(advs, a => a.amount))}</div></div>
           <div class="stat wide"><div class="l">كلفة الرواتب (راتب + مكافأة − خصم)</div><div class="v">${money(sum(list, payrollCost))}</div></div>
         </div>
+        ${(() => {
+          const logs = db.workLogs.filter(w => inR(w.date));
+          if (!logs.length) return '';
+          const by = {};
+          logs.forEach(w => { by[w.employeeId] = by[w.employeeId] || { q: 0, a: 0 }; by[w.employeeId].q += w.qty; by[w.employeeId].a += w.qty * w.rate; });
+          return `<div class="section-title">العمل المنجز (رواتب الإنجاز)</div><div class="table-wrap"><table><thead><tr><th>الموظف</th><th class="n">العدد</th><th class="n">المبلغ</th></tr></thead>
+            <tbody>${Object.entries(by).map(([id, v]) => { const e = byId(db.employees, id); return `<tr><td>${esc(e ? e.name : '—')}</td><td class="n">${num(v.q)} ${esc(unitName(e))}</td><td class="n">${num(v.a)}</td></tr>`; }).join('')}</tbody>
+            <tfoot><tr><td>المجموع</td><td class="n">${num(sum(logs, w => w.qty))}</td><td class="n">${num(sum(logs, w => w.qty * w.rate))}</td></tr></tfoot></table></div>`;
+        })()}
         ${list.length ? `<div class="table-wrap"><table><thead><tr><th>الموظف</th><th>الشهر</th><th class="n">الأساسي</th><th class="n">مكافأة</th><th class="n">خصم</th><th class="n">سلف</th><th class="n">الصافي</th></tr></thead>
           <tbody>${list.map(p => { const e = byId(db.employees, p.employeeId); return `<tr onclick="App.showPayslip('${p.id}')"><td>${esc(e ? e.name : '—')}</td><td>${monthName(p.month)}</td><td class="n">${num(p.base)}</td><td class="n">${num(p.bonus)}</td><td class="n">${num(p.deduction)}</td><td class="n">${num(p.advDeducted)}</td><td class="n bold">${num(p.net)}</td></tr>`; }).join('')}</tbody>
           <tfoot><tr><td colspan="6">المجموع</td><td class="n">${num(sum(list, p => p.net))}</td></tr></tfoot></table></div>` : empty}
@@ -1773,7 +1995,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     }
     return '';
   }
-  const REPORT_NAMES = { profit: 'تقرير الأرباح', sales: 'تقرير المبيعات', expenses: 'تقرير المصاريف', customers: 'تقرير العملاء', stock: 'تقرير المخزن', salaries: 'تقرير الرواتب' };
+  const REPORT_NAMES = { profit: 'تقرير الأرباح', sales: 'تقرير المبيعات', expenses: 'تقرير المصاريف', customers: 'تقرير العملاء', stock: 'تقرير المخزن', salaries: 'تقرير الرواتب', withdrawals: 'تقرير سحوبات الأرباح' };
   function printReport() {
     printHTML(`<h2>${esc(db.settings.shopName)} — ${REPORT_NAMES[rp.tab]}</h2>` + $('#reportBody').innerHTML);
   }
@@ -1802,6 +2024,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="list">
         ${item('employees', '👤', 'الموظفون', 'البيانات والسلف')}
         ${item('payroll', '💵', 'صرف الرواتب', 'الصرف الشهري وقسائم الرواتب')}
+      </div>
+      <div class="section-title">المالكون</div>
+      <div class="list">
+        ${item('withdrawals', '💼', 'سحوبات الأرباح', 'حصص المالكين وسحوباتهم')}
       </div>
       <div class="section-title">عام</div>
       <div class="list">${item('settings', '⚙️', 'الإعدادات والنسخ الاحتياطي', '')}</div>
@@ -1924,7 +2150,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 
   const VIEWS = {
     home, sales: salesList, stock, reports, more, settings, expenses, employees, payroll,
-    purchases: purchasesList,
+    purchases: purchasesList, withdrawals,
     'sale-new': () => editor('sale'), 'purchase-new': () => editor('purchase'),
     customers: () => partyList('customer'), suppliers: () => partyList('supplier')
   };
@@ -1936,6 +2162,13 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     expenseForm, saveExpense, deleteExpense,
     employeeForm, saveEmployee, deleteEmployee, showEmployee, advanceForm, saveAdvance, deleteAdvance,
     payrollForm, prCalc, savePayroll, payAll, showPayslip, deletePayroll,
+    workForm, workCalc, saveWork, deleteWork,
+    withdrawalForm, saveWithdrawal, deleteWithdrawal, ownerForm, saveOwner, deleteOwner,
+    prMonthChange(empId) { const m = val('prMonth'); if (m) payrollForm(empId, m); },
+    setPayType(btn) {
+      btn.parentNode.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === btn));
+      $('#emMonthly').hidden = btn.dataset.t === 'piece'; $('#emPiece').hidden = btn.dataset.t !== 'piece';
+    },
     printReport, reportPDF, saveSettings, updateApp, exportData, importData, importText, resetAll, loadDemo, picker,
     newInvoice(kind) { ed = newEd(kind); if (location.hash === '#' + kind + '-new') render(); else go(kind + '-new'); },
     edType(t) { ed.type = t; if (t === 'cash') ed.paid = 0; render(); },
