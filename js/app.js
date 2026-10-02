@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '1.9';
+  const APP_VERSION = '2.0';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -63,6 +63,25 @@
     return isFinite(n) ? n : 0;
   }
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  // بحث مرن: يتجاهل الهمزات والتاء المربوطة والأرقام العربية/الهندية
+  function norm(t) {
+    return String(t == null ? '' : t).toLowerCase()
+      .replace(/[٠-٩]/g, d => AR.indexOf(d)).replace(/[أإآٱ]/g, 'ا').replace(/ة/g, 'ه').replace(/ى/g, 'ي')
+      .replace(/[\u064B-\u0652\u0640]/g, '').replace(/\s+/g, ' ').trim();
+  }
+  function matches(q, ...fields) {
+    const nq = norm(q); if (!nq) return true;
+    // عدة كلمات: كل كلمة لازم تكون موجودة (بأي ترتيب)
+    if (nq.includes(' ')) { const all = norm(fields.join(' ')); return nq.split(' ').every(w => all.includes(w)); }
+    const digitsQ = nq.replace(/\D/g, '');
+    return fields.some(f => {
+      const nf = norm(f);
+      if (nf.includes(nq)) return true;
+      // رقم الهاتف: نقارن الأرقام فقط (07xx أو 9647xx)
+      if (digitsQ.length >= 3) { const df = nf.replace(/\D/g, ''); return df.includes(digitsQ) || df.includes(digitsQ.replace(/^0/, '')); }
+      return false;
+    });
+  }
   function fmtDate(d) { if (!d) return ''; const [y, m, dd] = d.split('-'); return digits(dd + '/' + m + '/' + y); }
   function monthName(ym) { const [y, m] = ym.split('-'); return MONTHS[Number(m) - 1] + ' ' + digits(y); }
   function val(id) { const el = document.getElementById(id); return el ? el.value.trim() : ''; }
@@ -196,6 +215,60 @@
     setTimeout(() => location.reload(), 300);
   }
 
+  /* ---------- اختيار زبون/مورد مع بحث ---------- */
+  const pickers = {};
+  function partyPickerHTML(id, kind, selectedId, onPick, emptyLabel) {
+    pickers[id] = { kind, onPick, emptyLabel };
+    const c = selectedId ? byId(PARTY[kind].list(), selectedId) : null;
+    return `<div class="picker" id="${id}">
+      <input type="hidden" id="${id}Val" value="${c ? c.id : ''}">
+      <div class="search"><input class="input" id="${id}Q" autocomplete="off" placeholder="${c ? '' : (emptyLabel || 'ابحث بالاسم أو رقم الهاتف')}" value="${esc(c ? c.name : '')}"
+        oninput="App.pickerFilter('${id}')" onfocus="App.pickerOpen('${id}')"></div>
+      <div class="picker-list" id="${id}List" hidden></div>
+    </div>`;
+  }
+  function pickerRender(id) {
+    const cfg = pickers[id]; if (!cfg) return;
+    const q = val(id + 'Q');
+    const sel = val(id + 'Val');
+    const selC = sel ? byId(PARTY[cfg.kind].list(), sel) : null;
+    const showAll = selC && q === selC.name;
+    const list = PARTY[cfg.kind].list()
+      .filter(c => showAll || matches(q, c.name, c.phone, c.notes))
+      .map(c => ({ c, b: partyBalance(cfg.kind, c.id) }))
+      .sort((a, b) => Math.abs(b.b) - Math.abs(a.b) || a.c.name.localeCompare(b.c.name, 'ar'));
+    const shown = list.slice(0, 40);
+    $('#' + id + 'List').innerHTML =
+      (cfg.emptyLabel ? `<div class="row" onclick="App.pickerPick('${id}','')"><div class="grow t muted">${esc(cfg.emptyLabel)}</div></div>` : '') +
+      (shown.length ? shown.map(({ c, b }) => `<div class="row" onclick="App.pickerPick('${id}','${c.id}')">
+        <div class="grow"><div class="t">${esc(c.name)}</div>${c.phone ? `<div class="s">${esc(digits(c.phone))}</div>` : ''}</div>
+        <div class="end">${balBadge(cfg.kind, b)}</div></div>`).join('') : '<div class="empty small">لا يوجد اسم مطابق</div>') +
+      (list.length > shown.length ? `<div class="small muted" style="padding:8px 14px">و ${num(list.length - shown.length)} آخرين… اكتب أكثر لتضييق البحث</div>` : '');
+  }
+  // الضغط خارج القائمة يسدها ويرجع الاسم المختار
+  document.addEventListener('click', e => {
+    Object.keys(pickers).forEach(id => {
+      const box = document.getElementById(id);
+      if (!box || box.contains(e.target)) return;
+      const list = document.getElementById(id + 'List'); if (!list || list.hidden) return;
+      list.hidden = true;
+      const sel = val(id + 'Val'); const c = sel ? byId(PARTY[pickers[id].kind].list(), sel) : null;
+      document.getElementById(id + 'Q').value = c ? c.name : '';
+    });
+  });
+  function pickerOpen(id) {
+    const inp = $('#' + id + 'Q'); if (inp) setTimeout(() => { try { inp.select(); } catch (e) { /* */ } }, 0);
+    $('#' + id + 'List').hidden = false; pickerRender(id);
+  }
+  function pickerPick(id, partyId) {
+    const cfg = pickers[id]; if (!cfg) return;
+    const c = partyId ? byId(PARTY[cfg.kind].list(), partyId) : null;
+    $('#' + id + 'Val').value = partyId;
+    const inp = $('#' + id + 'Q'); inp.value = c ? c.name : ''; inp.placeholder = c ? '' : (cfg.emptyLabel || 'ابحث بالاسم أو رقم الهاتف'); inp.blur();
+    $('#' + id + 'List').hidden = true;
+    if (cfg.onPick) cfg.onPick(partyId);
+  }
+
   /* ---------- Router ---------- */
   const ROOTS = ['home', 'sales', 'stock', 'reports', 'more'];
   const TAB_OF = { 'sale-new': 'sales', 'purchase-new': 'more' };
@@ -301,7 +374,7 @@
     let list = db.sales.slice().reverse();
     if (salesFilter !== 'all') list = list.filter(s => s.type === salesFilter);
     const q = salesQuery.trim();
-    if (q) list = list.filter(s => { const c = byId(db.customers, s.customerId); return String(s.no) === q || (c && c.name.includes(q)); });
+    if (q) list = list.filter(s => { const c = byId(db.customers, s.customerId); return String(s.no) === norm(q) || (c && matches(q, c.name, c.phone)); });
     V(`
       <button class="btn block" onclick="App.newInvoice('sale')" style="margin-bottom:12px">+ فاتورة بيع جديدة</button>
       <div class="seg">
@@ -357,11 +430,8 @@
       <div class="card">
         <label class="field"><span>${isSale ? 'الزبون' : 'المورد'} ${ed.type === 'credit' ? '(مطلوب)' : '(اختياري)'}</span>
           <div style="display:flex;gap:8px">
-            <select class="input" id="edParty" onchange="App.edField('partyId',this.value)">
-              <option value="">${isSale ? 'زبون نقدي' : 'بدون مورد'}</option>
-              ${parties.map(p => `<option value="${p.id}" ${p.id === ed.partyId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
-            </select>
-            <button class="btn secondary small" onclick="App.edNewParty()">+ جديد</button>
+            <div style="flex:1;min-width:0">${partyPickerHTML('edParty', isSale ? 'customer' : 'supplier', ed.partyId, id => App.edField('partyId', id), isSale ? 'زبون نقدي (ابحث لاختيار زبون)' : 'بدون مورد (ابحث لاختيار مورد)')}</div>
+            <button class="btn secondary small" style="align-self:flex-start;height:46px" onclick="App.edNewParty()">+ جديد</button>
           </div>
         </label>
         <label class="field" style="margin:0"><span>التاريخ</span><input type="date" class="input" value="${ed.date}" onchange="App.edField('date',this.value)"></label>
@@ -918,7 +988,7 @@
     const mine = sum(all, x => kind === 'customer' ? Math.max(0, x.bal) : Math.max(0, -x.bal));
     const theirs = sum(all, x => kind === 'customer' ? Math.max(0, -x.bal) : Math.max(0, x.bal));
     let list = all;
-    if (partyQuery.trim()) list = list.filter(x => x.c.name.includes(partyQuery.trim()) || (x.c.phone || '').includes(partyQuery.trim()));
+    if (partyQuery.trim()) list = list.filter(x => matches(partyQuery, x.c.name, x.c.phone, x.c.notes));
     list.sort((a, b) => b.bal - a.bal || a.c.name.localeCompare(b.c.name, 'ar'));
     V(`
       <div class="stats">
@@ -1028,10 +1098,9 @@
     const P = PARTY[kind];
     const list = P.list();
     if (!list.length) return toast('لا يوجد ' + P.many + ' بعد');
-    const opts = list.map(c => ({ c, b: partyBalance(kind, c.id) })).sort((a, b) => b.b - a.b);
     openSheet(P.payVerb, `
-      <label class="field"><span>${P.one === 'زبون' ? 'الزبون' : 'المورد'}</span>
-        <select class="input" id="payParty" onchange="App.payHint('${kind}')">${opts.map(({ c, b }) => `<option value="${c.id}" ${c.id === partyId ? 'selected' : ''}>${esc(c.name)} — ${balWord(kind, b)}</option>`).join('')}</select></label>
+      <div class="field"><span>${P.one === 'زبون' ? 'الزبون' : 'المورد'}</span>
+        ${partyPickerHTML('payParty', kind, partyId, () => payHint(kind))}</div>
       <div class="card small" id="payHint"></div>
       <label class="field"><span>المبلغ *</span><input class="input money" inputmode="numeric" id="payAmt" placeholder="0"></label>
       <label class="field"><span>التاريخ</span><input type="date" class="input" id="payDate" value="${today()}"></label>
@@ -1039,15 +1108,19 @@
       <button class="btn block" onclick="App.savePayment('${kind}')">حفظ الدفعة</button>
     `);
     payHint(kind);
+    if (!partyId) setTimeout(() => { const el = $('#payPartyQ'); if (el) el.focus(); }, 250);
   }
   function payHint(kind) {
-    const id = val('payParty'); const b = partyBalance(kind, id);
+    const id = val('payPartyVal');
+    if (!id) { $('#payHint').innerHTML = '<span class="muted">ابحث عن الاسم واختاره من القائمة</span>'; return; }
+    const b = partyBalance(kind, id);
     $('#payHint').innerHTML = `الرصيد الحالي: <b>${balWord(kind, b)}</b> ${b > 0 ? `<button class="link-btn" onclick="document.getElementById('payAmt').value='${fmtIn(b)}'">تسديد الكل</button>` : ''}`;
   }
   function savePayment(kind) {
     const amount = Math.round(nval('payAmt'));
     if (amount <= 0) return toast('اكتب المبلغ');
-    const partyId = val('payParty');
+    const partyId = val('payPartyVal');
+    if (!partyId) return toast('اختر الاسم أولاً');
     PARTY[kind].pay().push({ id: uid(), partyId, amount, date: val('payDate') || today(), note: val('payNote'), createdAt: new Date().toISOString() });
     save(); closeSheet(); toast('تم حفظ الدفعة'); render();
     if (location.hash.slice(1) === PARTY[kind].route) setTimeout(() => showParty(kind, partyId), 50);
@@ -1465,7 +1538,7 @@
   }
 
   /* ---------- Reports ---------- */
-  const rp = { preset: 'month', from: '', to: '', tab: 'profit' };
+  const rp = { preset: 'month', from: '', to: '', tab: 'profit', q: '' };
   function rpRange() {
     const n = new Date();
     if (rp.preset === 'today') return [today(), today()];
@@ -1582,9 +1655,9 @@
         return { c, count: inv.length, buy: sum(inv, s => s.total), paid: sum(inv, s => s.paid) + sum(pays, p => p.amount), bal: customerBalance(c.id), last };
       });
       const cashSales = db.sales.filter(s => !s.customerId && inR(s.date));
-      const active = rows.filter(r => r.count || Math.round(r.bal)).sort((a, b) => b.buy - a.buy);
-      const debtors = rows.filter(r => r.bal > 0).sort((a, b) => b.bal - a.bal);
-      const creditors = rows.filter(r => r.bal < 0).sort((a, b) => a.bal - b.bal);
+      const active = rows.filter(r => (r.count || Math.round(r.bal)) && matches(rp.q, r.c.name, r.c.phone)).sort((a, b) => b.buy - a.buy);
+      const debtors = rows.filter(r => r.bal > 0 && matches(rp.q, r.c.name, r.c.phone)).sort((a, b) => b.bal - a.bal);
+      const creditors = rows.filter(r => r.bal < 0 && matches(rp.q, r.c.name, r.c.phone)).sort((a, b) => a.bal - b.bal);
       return period + `
         <div class="stats">
           <div class="stat"><div class="l">عدد العملاء</div><div class="v">${num(db.customers.length)}</div></div>
@@ -1592,6 +1665,7 @@
           <div class="stat warn"><div class="l">عليهم - مطلوب لي (${num(debtors.length)})</div><div class="v">${money(sum(debtors, r => r.bal))}</div></div>
           <div class="stat bad"><div class="l">لهم - أنا مطلوب (${num(creditors.length)})</div><div class="v">${money(-sum(creditors, r => r.bal))}</div></div>
         </div>
+        <div class="search"><input class="input" id="rpQ" placeholder="ابحث عن زبون بالاسم أو الهاتف" value="${esc(rp.q)}" oninput="App.rpSearch(this.value)"></div>
         <div class="section-title">مشتريات العملاء في الفترة</div>
         ${active.length || cashSales.length ? `<div class="table-wrap"><table><thead><tr><th>الزبون</th><th class="n">الفواتير</th><th class="n">المشتريات</th><th class="n">المدفوع</th><th class="n">الرصيد الكلي</th><th>آخر شراء</th></tr></thead>
           <tbody>${active.map(r => `<tr onclick="App.showParty('customer','${r.c.id}')"><td>${esc(r.c.name)}</td><td class="n">${num(r.count)}</td><td class="n">${num(r.buy)}</td><td class="n">${num(r.paid)}</td><td class="n ${r.bal > 0 ? 'neg' : ''}">${balWord('customer', r.bal)}</td><td>${fmtDate(r.last)}</td></tr>`).join('')}
@@ -1872,7 +1946,10 @@
     pickCat(btn) { document.querySelectorAll('#catChips .chip').forEach(c => c.classList.remove('on')); btn.classList.add('on'); $('#eCat').value = btn.textContent; },
     setExpMonth(m) { expMonth = m || thisMonth(); render(); },
     setPayMonth(m) { payMonth = m || thisMonth(); render(); },
-    rpSet(k, v) { rp[k] = v; render(); }
+    rpSet(k, v) { rp[k] = v; render(); },
+    rpSearch(q) { rp.q = q; $('#reportBody').innerHTML = reportBody(); const el = $('#rpQ'); if (el) { el.focus(); el.setSelectionRange(q.length, q.length); } },
+    pickerFilter(id) { $('#' + id + 'List').hidden = false; pickerRender(id); },
+    pickerOpen, pickerPick
   };
 
   render();

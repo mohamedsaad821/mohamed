@@ -273,6 +273,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .pdf-title { font-size: 18px; font-weight: 800; }
 .pdf-foot { margin-top: 18px; padding-top: 8px; border-top: 1px solid var(--line); text-align: center; color: var(--muted); font-size: 12px; }
 .wa-btn { background: #25d366; color: #063d1d; text-decoration: none; }
+.picker { position: relative; }
+.picker .search { margin-bottom: 0; }
+.picker-list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-top: 6px; max-height: 300px; overflow-y: auto; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
+.picker-list .row { padding: 10px 12px; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {
