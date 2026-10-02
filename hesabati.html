@@ -340,7 +340,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.1';
+  const APP_VERSION = '2.2';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -418,6 +418,16 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       if (digitsQ.length >= 3) { const df = nf.replace(/\D/g, ''); return df.includes(digitsQ) || df.includes(digitsQ.replace(/^0/, '')); }
       return false;
     });
+  }
+  // منع تكرار الأسماء (يتجاهل الفراغات والهمزات والتاء المربوطة)
+  function nameTaken(list, name, selfId) {
+    const n = norm(name);
+    return list.find(x => x.id !== selfId && norm(x.name) === n);
+  }
+  function dupError(inputId, name) {
+    const el = document.getElementById(inputId);
+    if (el) { el.style.outline = '2px solid var(--red)'; el.focus(); setTimeout(() => { el.style.outline = ''; }, 2500); }
+    ask('هذا الاسم موجود: «' + name + '»\nاكتب اسماً آخر أو أضف شيئاً يميزه (مثل المنطقة أو الرقم).', { cancel: false });
   }
   function fmtDate(d) { if (!d) return ''; const [y, m, dd] = d.split('-'); return digits(dd + '/' + m + '/' + y); }
   function monthName(ym) { const [y, m] = ym.split('-'); return MONTHS[Number(m) - 1] + ' ' + digits(y); }
@@ -1294,12 +1304,12 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   async function saveProduct(id, fromPicker) {
     const name = val('pName');
     if (!name) return toast('اكتب اسم المنتج');
+    const dupP = nameTaken(db.products, name, id); if (dupP) return dupError('pName', dupP.name);
     const data = { name, unit: val('pUnit'), code: val('pCode'), cost: Math.round(nval('pCost')), price: Math.round(nval('pPrice')), qty: round3(nval('pQty')), minQty: nval('pMin') };
     if (data.price && data.cost && data.price < data.cost && !(await ask('سعر البيع أقل من سعر الشراء. هل تريد المتابعة؟'))) return;
     let p;
     if (id) { p = byId(db.products, id); Object.assign(p, data); }
     else {
-      if (db.products.some(x => x.name === name) && !(await ask('يوجد منتج بنفس الاسم. إضافة على أي حال؟'))) return;
       p = Object.assign({ id: uid(), createdAt: today() }, data); db.products.push(p);
     }
     save();
@@ -1364,6 +1374,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     setTimeout(() => { const el = $('#cName'); if (el && !c) el.focus(); }, 250);
     $('#cSave').onclick = () => {
       const name = val('cName'); if (!name) return toast('اكتب الاسم');
+      const dupC = nameTaken(P.list(), name, c ? c.id : ''); if (dupC) return dupError('cName', dupC.name);
       let rec;
       const amt = Math.abs(Math.round(nval('cOpen')));
       const dirBtn = document.querySelector('#cDirSeg .on');
@@ -1576,6 +1587,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   function saveEmployee(id) {
     const name = val('emName');
     if (!name) return toast('اكتب اسم الموظف');
+    const dupE = nameTaken(db.employees, name, id); if (dupE) return dupError('emName', dupE.name);
     const piece = (document.querySelector('#emTypeSeg .on') || {}).dataset.t === 'piece';
     const data = { name, job: val('emJob'), phone: val('emPhone'), startDate: val('emStart'), payType: piece ? 'piece' : 'monthly' };
     if (piece) {
@@ -1831,6 +1843,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   }
   function saveOwner(id) {
     const name = val('oName'); if (!name) return toast('اكتب اسم المالك');
+    const dupO = nameTaken(db.settings.owners, name, id); if (dupO) return dupError('oName', dupO.name);
     const share = Math.max(0, Math.min(100, nval('oShare')));
     if (id) Object.assign(byId(db.settings.owners, id), { name, share });
     else db.settings.owners.push({ id: uid(), name, share });
