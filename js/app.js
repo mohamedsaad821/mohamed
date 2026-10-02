@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.0';
+  const APP_VERSION = '2.1';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -162,8 +162,8 @@
   const advBalance = empId =>
     sum(db.advances.filter(a => a.employeeId === empId), a => a.amount) - sum(db.payrolls.filter(p => p.employeeId === empId), p => p.advDeducted);
   const payrollCost = p => p.base + p.bonus - p.deduction;
-  // راتب الإنجاز المرتبط بمنتج يدخل ضمن كلفة البضاعة، فلا يُحسب مرة ثانية كمصروف رواتب
-  const payrollExpense = p => p.inCost ? p.bonus - p.deduction : payrollCost(p);
+  // كل الرواتب (الثابتة ورواتب الإنجاز) تُحسب مصروف ضمن بند الرواتب
+  const payrollExpense = payrollCost;
   const isPiece = e => e && e.payType === 'piece';
   const monthLogs = (empId, month) => db.workLogs.filter(w => w.employeeId === empId && w.date.startsWith(month));
   const monthQty = (empId, month) => sum(monthLogs(empId, month), w => w.qty);
@@ -1201,7 +1201,7 @@
       }).join('')}</div>` : '<div class="card empty">لا يوجد موظفون. أضف موظفيك لترتيب صرف رواتبهم.</div>'}
       <div class="card small muted"><b>طريقة صرف الرواتب:</b><br>
       ١. أضف الموظف: براتب شهري ثابت، أو <b>حسب الإنجاز</b> (مثلاً ٢٠٠ دينار لكل ايميل).<br>
-      ↩ لموظف الإنجاز سجّل عدد القطع المنجزة من «تسجيل إنجاز»، فتنضاف للمخزن وكلفتها تدخل بكلفة القطعة.<br>
+      ↩ لموظف الإنجاز سجّل عدد الأعمال المنجزة من «تسجيل إنجاز»، وراتبه نهاية الشهر = العدد × سعر القطعة.<br>
       ٢. خلال الشهر سجّل أي <b>سلفة</b> يأخذها الموظف.<br>
       ٣. نهاية الشهر من «صرف الرواتب» اختر الشهر واضغط «صرف»؛ يحسب البرنامج: الراتب + المكافأة − الخصومات − السلف = <b>الصافي المستلم</b>.<br>
       ٤. تظهر الرواتب تلقائياً في تقرير الأرباح والمصاريف.</div>
@@ -1228,10 +1228,7 @@
           <label class="field"><span>اسم العمل</span><input class="input" id="emUnit" value="${esc(e && e.unitName ? e.unitName : 'ايميل')}"></label>
           <label class="field"><span>المبلغ لكل قطعة *</span><input class="input money" inputmode="numeric" id="emRate" value="${fmtIn(e ? e.rate : 200)}" placeholder="200"></label>
         </div>
-        <label class="field"><span>المنتج اللي ينتجه (تنضاف القطع للمخزن وتدخل بكلفتها)</span>
-          <select class="input" id="emProduct"><option value="">بدون ربط بمنتج</option>
-          ${db.products.map(pr => `<option value="${pr.id}" ${e && e.productId === pr.id ? 'selected' : ''}>${esc(pr.name)}</option>`).join('')}</select></label>
-        <div class="card small muted">الراتب نهاية الشهر = عدد القطع المنجزة × المبلغ لكل قطعة. وإذا ربطته بمنتج، المبلغ يدخل ضمن كلفة القطعة بالمخزن ولا يُحسب مرتين بالأرباح.</div>
+        <div class="card small muted">الراتب نهاية الشهر = عدد الأعمال المنجزة × المبلغ لكل قطعة، ويُحسب مصروف ضمن بند الرواتب.</div>
       </div>
       <label class="field"><span>تاريخ المباشرة</span><input type="date" class="input" id="emStart" value="${e ? e.startDate || '' : today()}"></label>
       ${e ? `<label class="field" style="display:flex;align-items:center;gap:10px"><input type="checkbox" id="emActive" ${e.active !== false ? 'checked' : ''} style="width:22px;height:22px"> <span style="margin:0">الموظف على رأس العمل</span></label>` : ''}
@@ -1245,7 +1242,7 @@
     const piece = (document.querySelector('#emTypeSeg .on') || {}).dataset.t === 'piece';
     const data = { name, job: val('emJob'), phone: val('emPhone'), startDate: val('emStart'), payType: piece ? 'piece' : 'monthly' };
     if (piece) {
-      Object.assign(data, { salary: 0, rate: Math.round(nval('emRate')), unitName: val('emUnit') || 'قطعة', productId: val('emProduct') });
+      Object.assign(data, { salary: 0, rate: Math.round(nval('emRate')), unitName: val('emUnit') || 'قطعة', productId: '' });
       if (!data.rate) return toast('اكتب المبلغ لكل قطعة');
     } else data.salary = Math.round(nval('emSal'));
     if (id) { const e = byId(db.employees, id); Object.assign(e, data); e.active = $('#emActive').checked; }
@@ -1298,20 +1295,13 @@
   }
   function workCalc() {
     const e = byId(db.employees, val('wEmp')); if (!e) return;
-    const q = nval('wQty'); const pr = byId(db.products, e.productId);
+    const q = nval('wQty');
     $('#wCalc').innerHTML = `<div class="tr"><span class="muted">${num(q)} × ${money(e.rate)}</span><span class="bold">${money(q * e.rate)}</span></div>
-      <div class="tr small"><span class="muted">منجز هذا الشهر قبل هذا</span><span>${num(monthQty(e.id, thisMonth()))} ${esc(unitName(e))}</span></div>
-      ${pr ? `<div class="tr small"><span class="muted">يضاف للمخزن</span><span>${esc(pr.name)} (+${num(q)})</span></div>` : ''}`;
+      <div class="tr small"><span class="muted">منجز هذا الشهر قبل هذا</span><span>${num(monthQty(e.id, thisMonth()))} ${esc(unitName(e))}</span></div>`;
   }
+  // الإنجاز يُسجل للراتب فقط، وما يغير المخزن ولا كلفة البضاعة
   function addWork(e, qty, date, note) {
-    const pr = byId(db.products, e.productId);
-    const w = { id: uid(), employeeId: e.id, date, qty, rate: e.rate, productId: pr ? pr.id : '', note };
-    if (pr) {
-      // كلفة القطعة = متوسط مرجّح يشمل أجرة الموظف
-      const oldQ = Math.max(0, pr.qty);
-      pr.cost = oldQ > 0 ? Math.round((oldQ * pr.cost + qty * e.rate) / (oldQ + qty)) : e.rate;
-      pr.qty = round3(pr.qty + qty);
-    }
+    const w = { id: uid(), employeeId: e.id, date, qty, rate: e.rate, productId: '', note };
     db.workLogs.push(w);
     return w;
   }
@@ -1418,7 +1408,7 @@
       if (qty < logged) return toast('العدد أقل من المسجل (' + num(logged) + '). احذف الإنجاز الزائد من صفحة الموظف.');
       // العدد الإضافي اللي انكتب عند الصرف يتسجل كإنجاز
       if (qty > logged) addWork(e, round3(qty - logged), rec.date, 'أضيف عند صرف الراتب');
-      Object.assign(rec, { piece: true, qty, rate: e.rate, inCost: !!byId(db.products, e.productId) });
+      Object.assign(rec, { piece: true, qty, rate: e.rate });
     }
     db.payrolls.push(rec); save(); closeSheet(); toast('تم صرف الراتب'); render();
     setTimeout(() => showPayslip(rec.id), 50);
@@ -1430,7 +1420,7 @@
     if (!(await ask(`صرف رواتب ${monthName(payMonth)} لـ ${list.length} موظف؟\nالمجموع الصافي: ${money(sum(rows, r => r.net))}\n(يتم خصم السلف تلقائياً، بدون مكافآت أو خصومات)`))) return;
     rows.forEach(({ e, base, adv, net }) => {
       const rec = { id: uid(), employeeId: e.id, month: payMonth, base, bonus: 0, deduction: 0, advDeducted: adv, net, date: today(), note: '' };
-      if (isPiece(e)) Object.assign(rec, { piece: true, qty: monthQty(e.id, payMonth), rate: e.rate, inCost: !!byId(db.products, e.productId) });
+      if (isPiece(e)) Object.assign(rec, { piece: true, qty: monthQty(e.id, payMonth), rate: e.rate });
       db.payrolls.push(rec);
     });
     save(); render(); toast('تم صرف الرواتب');
@@ -1587,7 +1577,6 @@
           <div class="kv"><span class="k bold">مجمل الربح</span><span class="v">${money(r.gross)}</span></div>
           <div class="kv"><span class="k">المصاريف</span><span class="v neg">− ${money(r.expenses)}</span></div>
           <div class="kv"><span class="k">الرواتب</span><span class="v neg">− ${money(r.salaries)}</span></div>
-          ${db.payrolls.some(p => p.inCost && inR(p.date)) ? '<div class="small muted">رواتب الإنجاز المرتبطة بمنتج محسوبة ضمن كلفة البضاعة.</div>' : ''}
           <div class="kv total"><span class="k">صافي الربح</span><span class="v ${r.net >= 0 ? 'pos' : 'neg'}">${money(r.net)}</span></div>
           ${r.revenue ? `<div class="small muted" style="margin-top:6px">نسبة الربح الصافي من المبيعات: ${num((r.net / r.revenue * 100).toFixed(1))}٪</div>` : ''}
         </div>
