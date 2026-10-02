@@ -277,6 +277,13 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .picker .search { margin-bottom: 0; }
 .picker-list { background: var(--card); border: 1px solid var(--line); border-radius: 12px; margin-top: 6px; max-height: 300px; overflow-y: auto; box-shadow: 0 6px 20px rgba(0,0,0,.12); }
 .picker-list .row { padding: 10px 12px; }
+.name-hint { margin: 0 4px 12px; font-size: 13.5px; min-height: 4px; }
+.name-hint .nh-ok { color: var(--green); font-weight: 600; }
+.name-hint .nh-warn { color: var(--muted); font-weight: 600; }
+.name-hint .nh-bad { color: var(--red); font-weight: 700; }
+.nh-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.name-chip { background: var(--bg); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; font-size: 13px; }
+.input.dup { border-color: var(--red); outline: 2px solid var(--red); outline-offset: -1px; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {

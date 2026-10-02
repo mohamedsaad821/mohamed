@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.2';
+  const APP_VERSION = '2.3';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -86,6 +86,29 @@
   function nameTaken(list, name, selfId) {
     const n = norm(name);
     return list.find(x => x.id !== selfId && norm(x.name) === n);
+  }
+  // فحص الاسم أثناء الكتابة: يبين الأسماء المشابهة الموجودة، وينبه فوراً إذا الاسم مكرر
+  const nameChecks = {};
+  function nameInput(inputId, value, getList, selfId, label) {
+    nameChecks[inputId] = { getList, selfId: selfId || '' };
+    return `<label class="field" style="margin-bottom:4px"><span>${label}</span><input class="input" id="${inputId}" autocomplete="off" value="${esc(value || '')}" oninput="App.nameCheck('${inputId}')"></label>
+      <div class="name-hint" id="${inputId}Hint"></div>`;
+  }
+  function nameCheck(inputId) {
+    const cfg = nameChecks[inputId]; const box = document.getElementById(inputId + 'Hint'); const inp = document.getElementById(inputId);
+    if (!cfg || !box || !inp) return;
+    const q = inp.value.trim();
+    if (!q) { box.innerHTML = ''; inp.classList.remove('dup'); return; }
+    const others = cfg.getList().filter(x => x.id !== cfg.selfId);
+    const exact = others.find(x => norm(x.name) === norm(q));
+    const similar = others.filter(x => x !== exact && matches(q, x.name)).slice(0, 6);
+    inp.classList.toggle('dup', !!exact);
+    const chips = list => list.map(x => `<span class="name-chip">${esc(x.name)}</span>`).join('');
+    box.innerHTML = exact
+      ? `<div class="nh-bad">⚠️ هذا الاسم موجود: «${esc(exact.name)}»</div>${similar.length ? `<div class="nh-list">${chips(similar)}</div>` : ''}`
+      : similar.length
+        ? `<div class="nh-warn">أسماء مشابهة موجودة (${num(others.filter(x => matches(q, x.name)).length)}):</div><div class="nh-list">${chips(similar)}</div>`
+        : `<div class="nh-ok">✓ الاسم غير مكرر</div>`;
   }
   function dupError(inputId, name) {
     const el = document.getElementById(inputId);
@@ -940,7 +963,7 @@
     const p = id ? byId(db.products, id) : null;
     const sold = p ? sum(db.sales, s => sum(s.items.filter(l => l.productId === p.id), l => l.qty)) : 0;
     const html = `
-      <label class="field"><span>اسم المنتج *</span><input class="input" id="pName" value="${esc(p ? p.name : '')}"></label>
+      ${nameInput('pName', p ? p.name : '', () => db.products, p ? p.id : '', 'اسم المنتج *')}
       <div class="grid2">
         <label class="field"><span>الوحدة</span><input class="input" id="pUnit" list="unitsList" value="${esc(p ? p.unit : 'قطعة')}"></label>
         <label class="field"><span>الباركود / الرمز</span><input class="input" id="pCode" value="${esc(p ? p.code || '' : '')}"></label>
@@ -1020,7 +1043,7 @@
     const P = PARTY[kind];
     const c = id ? byId(P.list(), id) : null;
     openSheet(c ? 'تعديل ' + P.one : P.one + ' جديد', `
-      <label class="field"><span>الاسم *</span><input class="input" id="cName" value="${esc(c ? c.name : '')}"></label>
+      ${nameInput('cName', c ? c.name : '', () => P.list(), c ? c.id : '', 'الاسم *')}
       <label class="field"><span>${kind === 'customer' ? 'رقم الواتساب' : 'رقم الهاتف'}</span><input class="input" id="cPhone" type="tel" inputmode="tel" value="${esc(c ? c.phone : '')}" placeholder="07xxxxxxxxx"></label>
       <label class="field"><span>العنوان / ملاحظات</span><input class="input" id="cNotes" value="${esc(c ? c.notes : '')}"></label>
       <div class="card">
@@ -1221,7 +1244,7 @@
   function employeeForm(id) {
     const e = id ? byId(db.employees, id) : null;
     openSheet(e ? 'تعديل موظف' : 'موظف جديد', `
-      <label class="field"><span>الاسم *</span><input class="input" id="emName" value="${esc(e ? e.name : '')}"></label>
+      ${nameInput('emName', e ? e.name : '', () => db.employees, e ? e.id : '', 'الاسم *')}
       <div class="grid2">
         <label class="field"><span>العمل / الوظيفة</span><input class="input" id="emJob" value="${esc(e ? e.job : '')}" placeholder="بائع، محاسب…"></label>
         <label class="field"><span>الهاتف</span><input class="input" id="emPhone" type="tel" inputmode="tel" value="${esc(e ? e.phone : '')}"></label>
@@ -1498,7 +1521,7 @@
   function ownerForm(id) {
     const o = id ? byId(db.settings.owners, id) : null;
     openSheet(o ? 'تعديل مالك' : 'مالك جديد', `
-      <label class="field"><span>اسم المالك *</span><input class="input" id="oName" value="${esc(o ? o.name : '')}"></label>
+      ${nameInput('oName', o ? o.name : '', () => db.settings.owners, o ? o.id : '', 'اسم المالك *')}
       <label class="field"><span>نسبة الحصة من الأرباح ٪ (اختياري)</span><input class="input qty" inputmode="decimal" id="oShare" value="${o && o.share ? o.share : ''}" placeholder="مثلاً 50"></label>
       <button class="btn block" onclick="App.saveOwner('${o ? o.id : ''}')">حفظ</button>
       ${o ? `<div class="btn-row"><button class="btn danger" onclick="App.deleteOwner('${o.id}')">حذف المالك</button></div>` : ''}
@@ -1951,7 +1974,7 @@
     rpSet(k, v) { rp[k] = v; render(); },
     rpSearch(q) { rp.q = q; $('#reportBody').innerHTML = reportBody(); const el = $('#rpQ'); if (el) { el.focus(); el.setSelectionRange(q.length, q.length); } },
     pickerFilter(id) { $('#' + id + 'List').hidden = false; pickerRender(id); },
-    pickerOpen, pickerPick
+    pickerOpen, pickerPick, nameCheck
   };
 
   render();
