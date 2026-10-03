@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.4';
+  const APP_VERSION = '2.5';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -15,7 +15,7 @@
       products: [], customers: [], suppliers: [],
       sales: [], purchases: [], expenses: [],
       payments: [], supplierPayments: [],
-      employees: [], advances: [], payrolls: [], workLogs: [], withdrawals: [], incomes: [],
+      employees: [], advances: [], payrolls: [], workLogs: [], withdrawals: [], incomes: [], assets: [],
       seq: { sale: 0, purchase: 0 }
     };
   }
@@ -210,7 +210,8 @@
       + sum(db.sales, s => s.paid) + sum(db.payments, p => p.amount)
       - sum(db.purchases, s => s.paid) - sum(db.supplierPayments, p => p.amount)
       - sum(db.expenses, e => e.amount) - sum(db.advances, a => a.amount) - sum(db.payrolls, p => p.net)
-      - sum(db.withdrawals, w => w.amount) + sum(db.incomes, x => x.amount);
+      - sum(db.withdrawals, w => w.amount) + sum(db.incomes, x => x.amount)
+      - sum(db.assets, a => a.cost) + sum(db.assets.filter(a => a.sold), a => a.saleAmount || 0);
   }
   function profitIn(from, to) {
     const inR = d => d >= from && d <= to;
@@ -220,7 +221,9 @@
     const expenses = sum(db.expenses.filter(e => inR(e.date)), e => e.amount);
     const salaries = sum(db.payrolls.filter(p => inR(p.date)), payrollExpense);
     const other = sum(db.incomes.filter(x => inR(x.date)), x => x.amount);
-    return { revenue, cogs, gross: revenue - cogs, other, expenses, salaries, net: revenue - cogs + other - expenses - salaries, count: sales.length };
+    // ربح أو خسارة بيع الثوابت (سعر البيع − سعر الشراء)
+    const assetGain = sum(db.assets.filter(a => a.sold && inR(a.saleDate)), a => (a.saleAmount || 0) - a.cost);
+    return { revenue, cogs, gross: revenue - cogs, other, assetGain, expenses, salaries, net: revenue - cogs + other + assetGain - expenses - salaries, count: sales.length };
   }
 
   /* ---------- Sheet (bottom modal) ---------- */
@@ -342,7 +345,8 @@
     const recent = db.sales.slice(-5).reverse();
     const cash = cashBox();
     const stockValue = sum(db.products, p => Math.max(0, p.qty) * p.cost);
-    const worth = cash + stockValue + recv - pay;
+    const assetsValue = sum(db.assets.filter(a => !a.sold), a => a.cost);
+    const worth = cash + stockValue + assetsValue + recv - pay;
 
     V(`
       <div class="hero">
@@ -1210,6 +1214,99 @@
     else db.expenses.push(Object.assign({ id: uid(), createdAt: new Date().toISOString() }, data));
     save(); closeSheet(); toast('تم الحفظ'); render();
   }
+  /* ---------- الثوابت (ممتلكات المشروع: تنقص الرصيد وما تنحسب مصروف) ---------- */
+  const ASSET_CATS = ['أجهزة وحاسبات', 'موبايلات', 'أثاث', 'معدات', 'ديكور', 'سيارات', 'أخرى'];
+  function assets() {
+    setTop('الثوابت', plusBtn('App.assetForm()'));
+    const owned = db.assets.filter(a => !a.sold).sort((a, b) => b.date.localeCompare(a.date));
+    const sold = db.assets.filter(a => a.sold).sort((a, b) => (b.saleDate || '').localeCompare(a.saleDate || ''));
+    const total = sum(owned, a => a.cost);
+    const cats = {};
+    owned.forEach(a => { cats[a.category] = (cats[a.category] || 0) + a.cost; });
+    const row = a => `<div class="row" onclick="App.showAsset('${a.id}')"><div class="grow"><div class="t">${esc(a.name)}${a.qty > 1 ? ` <span class="badge b-gray">× ${num(a.qty)}</span>` : ''}</div>
+      <div class="s">${esc(a.category)} · ${fmtDate(a.date)}${a.sold ? ' · بيع بـ ' + money(a.saleAmount || 0) : ''}</div></div>
+      <div class="end bold">${money(a.cost)}</div></div>`;
+    V(`
+      <div class="stats">
+        <div class="stat wide"><div class="l">قيمة الثوابت (${num(owned.length)} صنف)</div><div class="v">${money(total)}</div></div>
+      </div>
+      <button class="btn block" style="margin-bottom:12px" onclick="App.assetForm()">+ إضافة ثابت</button>
+      ${Object.keys(cats).length > 1 ? `<div class="card">${Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `
+        <div style="margin-bottom:10px"><div style="display:flex;justify-content:space-between"><span>${esc(k)}</span><b>${money(v)}</b></div>
+        <div class="bar"><i style="width:${(v / total * 100).toFixed(1)}%"></i></div></div>`).join('')}</div>` : ''}
+      ${owned.length ? `<div class="list">${owned.map(row).join('')}</div>` : '<div class="card empty">ما مسجل ثوابت بعد. أضف الأجهزة والأثاث والمعدات اللي اشتريتها للمشروع.</div>'}
+      ${sold.length ? `<div class="section-title">مباعة أو خرجت من الخدمة</div><div class="list">${sold.map(row).join('')}</div>` : ''}
+      <div class="card small muted">شراء الثوابت <b>ينقص من الرصيد</b>، بس <b>ما ينحسب مصروف</b> وما ينقص من الأرباح، لأنها ممتلكات للمشروع. قيمتها تدخل ضمن «صافي ما تملكه» بالصفحة الرئيسية.</div>
+    `);
+  }
+  function assetForm(id) {
+    const a = id ? byId(db.assets, id) : null;
+    openSheet(a ? 'تعديل ثابت' : 'ثابت جديد', `
+      ${nameInput('asName', a ? a.name : '', () => db.assets, a ? a.id : '', 'اسم الشي *')}
+      <label class="field"><span>النوع</span>
+        <div class="chips" id="asChips">${ASSET_CATS.map(c => `<button class="chip ${(a ? a.category : '') === c ? 'on' : ''}" onclick="App.pickAssetCat(this)">${esc(c)}</button>`).join('')}</div>
+        <input class="input" id="asCat" placeholder="أو اكتب نوعاً آخر" value="${esc(a ? a.category : '')}">
+      </label>
+      <div class="grid2">
+        <label class="field"><span>المبلغ الكلي المدفوع *</span><input class="input money" inputmode="numeric" id="asCost" value="${fmtIn(a ? a.cost : 0)}" placeholder="0"></label>
+        <label class="field"><span>العدد</span><input class="input qty" inputmode="numeric" id="asQty" value="${a ? a.qty || 1 : 1}"></label>
+      </div>
+      <label class="field"><span>تاريخ الشراء</span><input type="date" class="input" id="asDate" value="${a ? a.date : today()}"></label>
+      <label class="field"><span>ملاحظة (المحل، الضمان…)</span><input class="input" id="asNote" value="${esc(a ? a.note : '')}"></label>
+      <button class="btn block" onclick="App.saveAsset('${a ? a.id : ''}')">حفظ</button>
+    `);
+  }
+  function saveAsset(id) {
+    const name = val('asName'); if (!name) return toast('اكتب اسم الشي');
+    const cost = Math.round(nval('asCost')); if (cost <= 0) return toast('اكتب المبلغ');
+    const data = { name, category: val('asCat') || 'أخرى', cost, qty: Math.max(1, round3(nval('asQty'))), date: val('asDate') || today(), note: val('asNote') };
+    if (id) Object.assign(byId(db.assets, id), data);
+    else db.assets.push(Object.assign({ id: uid(), sold: false, createdAt: new Date().toISOString() }, data));
+    save(); closeSheet(); toast('تم الحفظ'); render();
+  }
+  function showAsset(id) {
+    const a = byId(db.assets, id); if (!a) return;
+    openSheet(a.name, `
+      <div class="card">
+        <div class="kv"><span class="k">النوع</span><span class="v">${esc(a.category)}</span></div>
+        <div class="kv"><span class="k">العدد</span><span class="v">${num(a.qty || 1)}</span></div>
+        <div class="kv"><span class="k">سعر الشراء</span><span class="v">${money(a.cost)}</span></div>
+        <div class="kv"><span class="k">تاريخ الشراء</span><span class="v">${fmtDate(a.date)}</span></div>
+        ${a.note ? `<div class="kv"><span class="k">ملاحظة</span><span class="v">${esc(a.note)}</span></div>` : ''}
+        ${a.sold ? `<div class="kv"><span class="k">بيع بتاريخ</span><span class="v">${fmtDate(a.saleDate)}</span></div>
+          <div class="kv"><span class="k">مبلغ البيع</span><span class="v">${money(a.saleAmount || 0)}</span></div>
+          <div class="kv"><span class="k">${(a.saleAmount || 0) >= a.cost ? 'ربح' : 'خسارة'}</span><span class="v ${(a.saleAmount || 0) >= a.cost ? 'pos' : 'neg'}">${money(Math.abs((a.saleAmount || 0) - a.cost))}</span></div>` : ''}
+      </div>
+      ${a.sold ? `<div class="btn-row"><button class="btn secondary" onclick="App.unsellAsset('${a.id}')">إلغاء البيع</button></div>`
+        : `<div class="btn-row"><button class="btn" onclick="App.sellAssetForm('${a.id}')">بيع / إخراج من الخدمة</button><button class="btn secondary" onclick="App.assetForm('${a.id}')">تعديل</button></div>`}
+      <div class="btn-row"><button class="btn danger" onclick="App.deleteAsset('${a.id}')">حذف (إذا انسجل بالغلط)</button></div>
+    `);
+  }
+  function sellAssetForm(id) {
+    const a = byId(db.assets, id); if (!a) return;
+    openSheet('بيع / إخراج: ' + a.name, `
+      <label class="field"><span>مبلغ البيع (اكتب 0 إذا تلف أو انرمى)</span><input class="input money" inputmode="numeric" id="asSale" placeholder="0"></label>
+      <label class="field"><span>التاريخ</span><input type="date" class="input" id="asSaleDate" value="${today()}"></label>
+      <div class="card small muted">مبلغ البيع يرجع للرصيد. والفرق عن سعر الشراء (${money(a.cost)}) ينحسب ربح أو خسارة بتقرير الأرباح.</div>
+      <button class="btn block" onclick="App.sellAsset('${a.id}')">تأكيد</button>
+    `);
+  }
+  function sellAsset(id) {
+    const a = byId(db.assets, id); if (!a) return;
+    Object.assign(a, { sold: true, saleAmount: Math.round(nval('asSale')), saleDate: val('asSaleDate') || today() });
+    save(); closeSheet(); toast('تم'); render();
+  }
+  function unsellAsset(id) {
+    const a = byId(db.assets, id); if (!a) return;
+    Object.assign(a, { sold: false, saleAmount: 0, saleDate: '' });
+    save(); closeSheet(); render();
+  }
+  async function deleteAsset(id) {
+    const a = byId(db.assets, id); if (!a) return;
+    if (!(await ask('حذف «' + a.name + '»؟ المبلغ يرجع للرصيد كأنه ما انشرى.\nإذا بعته أو تلف استخدم «بيع / إخراج من الخدمة».'))) return;
+    db.assets = db.assets.filter(x => x.id !== id); save(); closeSheet(); render();
+  }
+
   /* ---------- إيرادات أخرى (تزيد الرصيد وتنحسب بالأرباح) ---------- */
   const INC_CATS = ['أرباح سابقة', 'عمولة', 'خدمات', 'أخرى'];
   let incMonth = thisMonth();
@@ -1656,6 +1753,7 @@
           <div class="kv"><span class="k">كلفة البضاعة المباعة</span><span class="v neg">− ${money(r.cogs)}</span></div>
           <div class="kv"><span class="k bold">مجمل الربح</span><span class="v">${money(r.gross)}</span></div>
           ${r.other ? `<div class="kv"><span class="k">إيرادات أخرى</span><span class="v pos">+ ${money(r.other)}</span></div>` : ''}
+          ${r.assetGain ? `<div class="kv"><span class="k">${r.assetGain > 0 ? 'ربح' : 'خسارة'} بيع ثوابت</span><span class="v ${r.assetGain > 0 ? 'pos' : 'neg'}">${r.assetGain > 0 ? '+' : '−'} ${money(Math.abs(r.assetGain))}</span></div>` : ''}
           <div class="kv"><span class="k">المصاريف</span><span class="v neg">− ${money(r.expenses)}</span></div>
           <div class="kv"><span class="k">الرواتب</span><span class="v neg">− ${money(r.salaries)}</span></div>
           <div class="kv total"><span class="k">صافي الربح</span><span class="v ${r.net >= 0 ? 'pos' : 'neg'}">${money(r.net)}</span></div>
@@ -1705,7 +1803,8 @@
           <div class="stat wide bad"><div class="l">المصاريف التشغيلية</div><div class="v">${money(total)}</div></div>
           <div class="stat"><div class="l">الرواتب</div><div class="v">${money(sal)}</div></div>
           <div class="stat"><div class="l">السلف المدفوعة</div><div class="v">${money(adv)}</div></div>
-          <div class="stat wide"><div class="l">المشتريات (بضاعة)</div><div class="v">${money(purch)}</div></div>
+          <div class="stat"><div class="l">المشتريات (بضاعة)</div><div class="v">${money(purch)}</div></div>
+          <div class="stat"><div class="l">شراء ثوابت (ما ينحسب مصروف)</div><div class="v">${money(sum(db.assets.filter(a => inR(a.date)), a => a.cost))}</div></div>
         </div>
         <div class="section-title">حسب النوع</div>
         ${list.length ? `<div class="card">${Object.entries(cats).sort((a, b) => b[1] - a[1]).map(([k, v]) => `
@@ -1826,6 +1925,7 @@
         ${item('purchases', '🚚', 'المشتريات', 'إدخال بضاعة للمخزن')}
         ${item('expenses', '💸', 'المصاريف', 'إيجار، كهرباء، مولدة…')}
         ${item('incomes', '💵', 'إيرادات أخرى', 'أرباح سابقة، عمولات… تنحسب بالأرباح')}
+        ${item('assets', '🏢', 'الثوابت', 'أجهزة، أثاث، معدات… ممتلكات المشروع')}
       </div>
       <div class="section-title">الحسابات</div>
       <div class="list">
@@ -1963,7 +2063,7 @@
 
   const VIEWS = {
     home, sales: salesList, stock, reports, more, settings, expenses, employees, payroll,
-    purchases: purchasesList, withdrawals, incomes,
+    purchases: purchasesList, withdrawals, incomes, assets,
     'sale-new': () => editor('sale'), 'purchase-new': () => editor('purchase'),
     customers: () => partyList('customer'), suppliers: () => partyList('supplier')
   };
@@ -1973,6 +2073,8 @@
     go, closeSheet, showInvoice, deleteInvoice, productForm, saveProduct, deleteProduct,
     partyForm, showParty, deleteParty, paymentForm, payHint, savePayment, deletePayment, shareStatement,
     expenseForm, saveExpense, deleteExpense, incomeForm, saveIncome, deleteIncome,
+    assetForm, saveAsset, showAsset, sellAssetForm, sellAsset, unsellAsset, deleteAsset,
+    pickAssetCat(btn) { document.querySelectorAll('#asChips .chip').forEach(c => c.classList.remove('on')); btn.classList.add('on'); $('#asCat').value = btn.textContent; },
     setIncMonth(m) { incMonth = m || thisMonth(); render(); },
     pickIncCat(btn) { document.querySelectorAll('#incChips .chip').forEach(c => c.classList.remove('on')); btn.classList.add('on'); $('#iCat').value = btn.textContent; },
     employeeForm, saveEmployee, deleteEmployee, showEmployee, advanceForm, saveAdvance, deleteAdvance,
