@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.5';
+  const APP_VERSION = '2.6';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -446,14 +446,18 @@
   /* ---------- Invoice editor (sale & purchase) ---------- */
   let ed = null;
   function newEd(kind) {
-    return { kind, date: today(), type: 'cash', partyId: '', lines: [], discount: 0, paid: 0, note: '' };
+    return { kind, date: today(), type: 'cash', partyId: '', lines: [], discount: 0, paid: 0, oldPay: 0, note: '' };
   }
   function edTotals() {
     const sub = sum(ed.lines, l => l.qty * l.price);
     const disc = Math.min(sub, Math.max(0, toNum(ed.discount)));
     const total = Math.max(0, sub - disc);
-    const paid = ed.type === 'cash' ? total : Math.min(total, Math.max(0, toNum(ed.paid)));
-    return { sub, disc, total, paid, rem: total - paid };
+    const rawPaid = Math.max(0, toNum(ed.paid));
+    const paid = ed.type === 'cash' ? total : Math.min(total, rawPaid);
+    // دفعة على الحساب السابق: الحقل الخاص + أي زيادة بالمدفوع عن قيمة الفاتورة
+    const overflow = ed.type === 'credit' ? Math.max(0, rawPaid - total) : 0;
+    const extra = ed.partyId ? Math.round(Math.max(0, toNum(ed.oldPay)) + overflow) : 0;
+    return { sub, disc, total, paid, rem: total - paid, extra };
   }
   function editor(kind) {
     if (!ed || ed.kind !== kind) ed = newEd(kind);
@@ -492,16 +496,25 @@
       </div>
     `);
   }
+  // بطاقة حساب الزبون/المورد داخل الفاتورة: رصيده + تسجيل دفعة على حسابه السابق
   function edCreditHint() {
     if (!ed.partyId) return '';
-    const bal = partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId);
-    const credit = ed.kind === 'sale' ? -bal : bal;  // ما أنا مطلوب له
-    if (credit > 0 && ed.kind === 'sale') {
-      return `<div class="card" style="background:var(--blue-soft);color:var(--blue)">لهذا الزبون رصيد له: <b>${money(credit)}</b> (أنت مطلوب له).
-        ${ed.type === 'credit' && !toNum(ed.paid) ? '<br>✓ قيمة هذه الفاتورة ستُخصم من رصيده.' : `<br><button class="btn small" style="margin-top:8px" onclick="App.edUseCredit()">خصم الفاتورة من رصيده</button>`}</div>`;
+    const isSale = ed.kind === 'sale';
+    const kind = isSale ? 'customer' : 'supplier';
+    const bal = partyBalance(kind, ed.partyId);
+    if (isSale && bal < 0) {
+      return `<div class="card" style="background:var(--blue-soft);color:var(--blue)">لهذا الزبون رصيد له: <b>${money(-bal)}</b> (أنت مطلوب له).
+        ${ed.type === 'credit' && !toNum(ed.paid) ? '<br>✓ قيمة هذه الفاتورة تنخصم من رصيده تلقائياً.' : `<br><button class="btn small" style="margin-top:8px" onclick="App.edUseCredit()">خصم الفاتورة من رصيده</button>`}</div>`;
     }
-    if (bal > 0 && ed.kind === 'sale') return `<div class="card small" style="background:var(--amber-soft);color:var(--amber)">على هذا الزبون دين سابق: <b>${money(bal)}</b></div>`;
-    return '';
+    if (bal > 0) {
+      return `<div class="card" style="background:var(--amber-soft)">
+        <div style="color:var(--amber)">${isSale ? 'على هذا الزبون دين سابق' : 'عليك لهذا المورد دين سابق'}: <b>${money(bal)}</b></div>
+        <label class="field" style="margin:10px 0 0"><span>${isSale ? 'دفعة استلمتها على الحساب السابق' : 'دفعة سددتها من الحساب السابق'}</span>
+          <div style="display:flex;gap:8px"><input class="input money" inputmode="numeric" id="edOldPay" placeholder="0" value="${fmtIn(ed.oldPay)}" oninput="App.edField('oldPay',this.value)">
+          <button class="btn secondary small" onclick="App.edPayAll()">تسديد الكل</button></div></label>
+      </div>`;
+    }
+    return `<div class="card small muted">حساب ${isSale ? 'الزبون' : 'المورد'}: لا يوجد رصيد سابق.</div>`;
   }
   function stockOf(pid) { const p = byId(db.products, pid); return p ? p.qty : 0; }
   function edLinesHTML() {
@@ -523,7 +536,9 @@
       <div class="tr big"><span>الإجمالي</span><span>${money(t.total)}</span></div>
       ${ed.type === 'credit' ? `<div class="tr"><span class="muted">المدفوع</span><span>${money(t.paid)}</span></div>
       <div class="tr bold"><span>${ed.kind === 'sale' ? 'يضاف إلى حساب الزبون' : 'يضاف إلى حساب المورد'}</span><span class="neg">${money(t.rem)}</span></div>
-      ${ed.partyId ? `<div class="tr small"><span class="muted">رصيده بعد الفاتورة</span><span>${balWord(ed.kind === 'sale' ? 'customer' : 'supplier', partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId) + t.rem)}</span></div>` : ''}` : ''}`;
+` : ''}
+      ${t.extra ? `<div class="tr bold"><span>${ed.kind === 'sale' ? 'دفعة على الحساب السابق' : 'تسديد من الحساب السابق'}</span><span class="pos">− ${money(t.extra)}</span></div>` : ''}
+      ${ed.partyId ? `<div class="tr small"><span class="muted">رصيد الحساب بعد الفاتورة</span><span class="bold">${balWord(ed.kind === 'sale' ? 'customer' : 'supplier', partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId) + t.rem - t.extra)}</span></div>` : ''}`;
   }
   function edRefresh(lines) {
     if (lines) $('#edLines').innerHTML = edLinesHTML();
@@ -568,8 +583,12 @@
     const doc = {
       id: uid(), no: ++db.seq[ed.kind], date: ed.date || today(), type: ed.type,
       items: lines.map(l => ({ productId: l.productId, name: l.name, qty: l.qty, price: Math.round(l.price), cost: isSale ? (byId(db.products, l.productId) || l).cost : Math.round(l.price) })),
-      discount: t.disc, total: t.total, paid: t.paid, note: ed.note, createdAt: new Date().toISOString()
+      discount: t.disc, total: t.total, paid: t.paid, accountPay: t.extra || 0, note: ed.note, createdAt: new Date().toISOString()
     };
+    // الدفعة على الحساب السابق تنحفظ كدفعة مربوطة بالفاتورة
+    if (t.extra > 0) {
+      (isSale ? db.payments : db.supplierPayments).push({ id: uid(), partyId: ed.partyId, amount: t.extra, date: doc.date, note: 'دفعة مع فاتورة #' + doc.no, invoiceId: doc.id, createdAt: doc.createdAt });
+    }
     if (isSale) {
       doc.customerId = ed.partyId;
       doc.items.forEach(l => { const p = byId(db.products, l.productId); if (p) p.qty = round3(p.qty - l.qty); });
@@ -613,6 +632,8 @@
         <div class="kv total"><span class="k">الإجمالي</span><span class="v">${money(inv.total)}</span></div>
         <div class="kv"><span class="k">المدفوع</span><span class="v">${money(inv.paid)}</span></div>
         ${inv.total - inv.paid > 0 ? `<div class="kv"><span class="k">المتبقي</span><span class="v neg">${money(inv.total - inv.paid)}</span></div>` : ''}
+        ${inv.accountPay ? `<div class="kv"><span class="k">${isSale ? 'دفعة على الحساب السابق' : 'تسديد من الحساب السابق'}</span><span class="v pos">${money(inv.accountPay)}</span></div>` : ''}
+        ${party ? `<div class="kv"><span class="k">رصيد الحساب الحالي</span><span class="v">${balWord(isSale ? 'customer' : 'supplier', partyBalance(isSale ? 'customer' : 'supplier', party.id))}</span></div>` : ''}
         ${inv.note ? `<div class="kv"><span class="k">ملاحظات</span><span class="v">${esc(inv.note)}</span></div>` : ''}
       </div>`;
   }
@@ -768,9 +789,10 @@
         ['نوع الفاتورة', inv.type === 'credit' ? 'آجل' : 'نقدي'],
         inv.discount ? ['الخصم', money(inv.discount)] : null,
         ['الدفعة المستلمة', money(inv.paid)],
-        ['المتبقي', money(rem), rem > 0 ? '#dc2626' : '#15803d']
+        ['المتبقي', money(rem), rem > 0 ? '#dc2626' : '#15803d'],
+        inv.accountPay ? ['دفعة على الحساب', money(inv.accountPay), '#15803d'] : null
       ];
-      if (cust && inv.type === 'credit') {
+      if (cust && (inv.type === 'credit' || inv.accountPay || Math.round(customerBalance(cust.id)))) {
         const b = customerBalance(cust.id);
         rows.push(['رصيد الحساب', !Math.round(b) ? 'مسدد' : (b > 0 ? 'مطلوب منكم ' : 'لكم ') + money(Math.abs(b)), b > 0 ? '#dc2626' : '#15803d']);
       }
@@ -916,6 +938,7 @@
       inv.discount ? 'الخصم: ' + money(inv.discount) : '',
       'الإجمالي: ' + money(inv.total), 'المدفوع: ' + money(inv.paid),
       inv.total - inv.paid > 0 ? 'المتبقي: ' + money(inv.total - inv.paid) : '',
+      inv.accountPay ? 'دفعة على الحساب السابق: ' + money(inv.accountPay) : '',
       party && isSale ? (b => 'رصيد حسابك: ' + (!Math.round(b) ? 'مسدد' : (b > 0 ? 'مطلوب منكم ' : 'لكم ') + money(Math.abs(b))))(customerBalance(party.id)) : ''
     ].filter((x, i, a) => x !== '' || (a[i - 1] !== '')).join('\n');
   }
@@ -924,9 +947,11 @@
     try { await navigator.clipboard.writeText(text); toast('تم النسخ'); } catch (e) { ask('انسخ النص:', { cancel: false, text }); }
   }
   async function deleteInvoice(kind, id) {
-    if (!(await ask('هل أنت متأكد من حذف الفاتورة؟ سيتم تعديل المخزن تلقائياً.'))) return;
     const arr = kind === 'sale' ? db.sales : db.purchases;
     const inv = byId(arr, id); if (!inv) return;
+    if (!(await ask('هل أنت متأكد من حذف الفاتورة؟ سيتم تعديل المخزن تلقائياً.' + (inv.accountPay ? '\nوتنحذف معها الدفعة على الحساب (' + money(inv.accountPay) + ').' : '')))) return;
+    if (kind === 'sale') db.payments = db.payments.filter(x => x.invoiceId !== id);
+    else db.supplierPayments = db.supplierPayments.filter(x => x.invoiceId !== id);
     inv.items.forEach(l => { const p = byId(db.products, l.productId); if (p) p.qty = round3(p.qty + (kind === 'sale' ? l.qty : -l.qty)); });
     arr.splice(arr.indexOf(inv), 1);
     save(); closeSheet(); render(); toast('تم الحذف');
@@ -2089,7 +2114,19 @@
     printReport, reportPDF, saveSettings, updateApp, exportData, importData, importText, resetAll, loadDemo, picker,
     newInvoice(kind) { ed = newEd(kind); if (location.hash === '#' + kind + '-new') render(); else go(kind + '-new'); },
     edType(t) { ed.type = t; if (t === 'cash') ed.paid = 0; render(); },
-    edField(k, v) { ed[k] = v; if (k === 'partyId') render(); else if (k === 'discount' || k === 'paid') edRefresh(false); },
+    edField(k, v) {
+      ed[k] = v;
+      if (k === 'partyId') {
+        ed.oldPay = 0;
+        // زبون أنا مطلوب له: الفاتورة تنخصم من رصيده تلقائياً
+        if (ed.kind === 'sale' && v && customerBalance(v) < 0) { ed.type = 'credit'; ed.paid = 0; }
+        render();
+      } else if (k === 'discount' || k === 'paid' || k === 'oldPay') edRefresh(false);
+    },
+    edPayAll() {
+      const bal = partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId);
+      ed.oldPay = Math.max(0, Math.round(bal)); const el = $('#edOldPay'); if (el) el.value = fmtIn(ed.oldPay); edRefresh(false);
+    },
     edUseCredit() { ed.type = 'credit'; ed.paid = 0; render(); },
     setDir(btn) { btn.parentNode.querySelectorAll('button').forEach(b => b.classList.toggle('on', b === btn)); },
     edLine(i, k, v) { ed.lines[i][k] = toNum(v); edRefresh(false); },
