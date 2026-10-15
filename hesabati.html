@@ -347,7 +347,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.7';
+  const APP_VERSION = '2.8';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -1159,14 +1159,6 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         txt(num(l.price), TPL.price, y, { size: 20 });
         txt(num(l.qty * l.price), TPL.total, y, { bold: true, size: 20 });
       });
-      const rTxt = rangeText(inv);
-      let rangeInPanel = false;
-      if (rTxt && last) {
-        if (items.length < TPL.rows) {
-          const y = TPL.rowY0 + TPL.rowH * items.length;
-          txt('أرقام الحسابات: ' + rTxt, TPL.name[0], y, { align: 'right', bold: true, size: 19, color: '#0b3fa8', max: 840 });
-        } else rangeInPanel = true;
-      }
       if (chunks.length > 1) txt(`صفحة ${num(pi + 1)} من ${num(chunks.length)}`, 512, 1283, { size: 15, color: '#475569' });
       if (!last) { txt('يتبع…', TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 22 }); return c; }
       txt(money(inv.total), TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 25, color: '#0b3fa8' });
@@ -1174,8 +1166,9 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       const rem = inv.total - inv.paid;
       const rows = [
         ['الزبون', cust ? cust.name : 'زبون نقدي'],
+        // رقم الحساب تحت اسم الزبون مباشرة، مثل 20-30
+        inv.rangeFrom || inv.rangeTo ? ['رقم الحساب', '\u2066' + digits([inv.rangeFrom, inv.rangeTo].filter(Boolean).join('-')) + '\u2069'] : null,
         ['نوع الفاتورة', inv.type === 'credit' ? 'آجل' : 'نقدي'],
-        rangeInPanel ? ['أرقام الحسابات', digits((inv.rangeFrom || '—') + ' - ' + (inv.rangeTo || '—'))] : null,
         inv.discount ? ['الخصم', money(inv.discount)] : null,
         ['الدفعة المستلمة', money(inv.paid)],
         ['المتبقي', money(rem), rem > 0 ? '#dc2626' : '#15803d'],
