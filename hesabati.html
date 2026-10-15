@@ -347,7 +347,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.6';
+  const APP_VERSION = '2.7';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -747,7 +747,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const rem = s.total - s.paid;
     return `<div class="row" onclick="App.showInvoice('sale','${s.id}')">
       <div class="grow"><div class="t">${esc(c ? c.name : 'زبون نقدي')}</div>
-      <div class="s">فاتورة #${num(s.no)} · ${fmtDate(s.date)}</div></div>
+      <div class="s">فاتورة #${num(s.no)} · ${fmtDate(s.date)}${s.rangeFrom || s.rangeTo ? ' · حسابات ' + esc(digits((s.rangeFrom || '?') + '-' + (s.rangeTo || '?'))) : ''}</div></div>
       <div class="end"><div class="bold">${money(s.total)}</div>
       ${s.type === 'credit' ? (rem > 0 ? `<span class="badge b-amber">آجل · باقي ${money(rem)}</span>` : `<span class="badge b-green">آجل · مسدد</span>`) : `<span class="badge b-green">نقدي</span>`}</div></div>`;
   }
@@ -756,7 +756,12 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     let list = db.sales.slice().reverse();
     if (salesFilter !== 'all') list = list.filter(s => s.type === salesFilter);
     const q = salesQuery.trim();
-    if (q) list = list.filter(s => { const c = byId(db.customers, s.customerId); return String(s.no) === norm(q) || (c && matches(q, c.name, c.phone)); });
+    if (q) list = list.filter(s => {
+      const c = byId(db.customers, s.customerId);
+      // البحث برقم حساب يلگى الفاتورة اللي النطاق مالها يشمله
+      const nq = toNum(q), inRange = /^\s*[\d٠-٩]+\s*$/.test(q) && rangeCount(s.rangeFrom || '', s.rangeTo || '') && nq >= toNum(s.rangeFrom) && nq <= toNum(s.rangeTo);
+      return String(s.no) === norm(q) || inRange || (c && matches(q, c.name, c.phone));
+    });
     V(`
       <button class="btn block" onclick="App.newInvoice('sale')" style="margin-bottom:12px">+ فاتورة بيع جديدة</button>
       <div class="seg">
@@ -787,10 +792,22 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     `);
   }
 
+  /* ---------- نطاق أرقام الحسابات (من - إلى) ---------- */
+  function rangeCount(from, to) {
+    const a = toNum(from), b = toNum(to);
+    if (!String(from).trim() || !String(to).trim() || !/^\s*[\d٠-٩]+\s*$/.test(from) || !/^\s*[\d٠-٩]+\s*$/.test(to) || b < a) return 0;
+    return b - a + 1;
+  }
+  function rangeText(inv) {
+    if (!inv.rangeFrom && !inv.rangeTo) return '';
+    const n = rangeCount(inv.rangeFrom || '', inv.rangeTo || '');
+    return 'من ' + digits(inv.rangeFrom || '—') + ' إلى ' + digits(inv.rangeTo || '—') + (n ? ' (' + num(n) + ' حساب)' : '');
+  }
+
   /* ---------- Invoice editor (sale & purchase) ---------- */
   let ed = null;
   function newEd(kind) {
-    return { kind, date: today(), type: 'cash', partyId: '', lines: [], discount: 0, paid: 0, oldPay: 0, note: '' };
+    return { kind, date: today(), type: 'cash', partyId: '', lines: [], discount: 0, paid: 0, oldPay: 0, rangeFrom: '', rangeTo: '', note: '' };
   }
   function edTotals() {
     const sub = sum(ed.lines, l => l.qty * l.price);
@@ -826,6 +843,14 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="section-title">المنتجات</div>
       <div class="list" id="edLines">${edLinesHTML()}</div>
       <button class="btn secondary block" onclick="App.picker()">+ إضافة منتج</button>
+      ${kind === 'sale' ? `<div class="section-title">النطاقات (أرقام الحسابات)</div>
+      <div class="card">
+        <div class="grid2">
+          <label class="field" style="margin:0"><span>من رقم</span><input class="input" dir="ltr" inputmode="numeric" id="edRangeFrom" placeholder="مثلاً 1001" value="${esc(ed.rangeFrom)}" oninput="App.edRange('rangeFrom',this.value)"></label>
+          <label class="field" style="margin:0"><span>إلى رقم</span><input class="input" dir="ltr" inputmode="numeric" id="edRangeTo" placeholder="مثلاً 1050" value="${esc(ed.rangeTo)}" oninput="App.edRange('rangeTo',this.value)"></label>
+        </div>
+        <div class="small muted" id="edRangeInfo" style="margin-top:8px">${edRangeInfo()}</div>
+      </div>` : ''}
       <div class="card" style="margin-top:12px">
         <div class="grid2">
           <label class="field"><span>الخصم</span><input class="input money" inputmode="numeric" placeholder="0" value="${fmtIn(ed.discount)}" oninput="App.edField('discount',this.value)"></label>
@@ -860,6 +885,13 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     }
     return `<div class="card small muted">حساب ${isSale ? 'الزبون' : 'المورد'}: لا يوجد رصيد سابق.</div>`;
   }
+  function edRangeInfo() {
+    if (!ed.rangeFrom && !ed.rangeTo) return 'اختياري: اكتب أول وآخر رقم حساب، ويطلع بالفاتورة.';
+    const n = rangeCount(ed.rangeFrom, ed.rangeTo);
+    if (ed.rangeFrom && ed.rangeTo && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeFrom) && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeTo) && !n) return '<span class="neg">رقم «إلى» أصغر من رقم «من»</span>';
+    const qty = sum(ed.lines, l => l.qty);
+    return n ? `عدد الحسابات: <b>${num(n)}</b>${qty && qty !== n ? ` <span class="neg">(عدد القطع بالفاتورة ${num(qty)})</span>` : ''}` : '';
+  }
   function stockOf(pid) { const p = byId(db.products, pid); return p ? p.qty : 0; }
   function edLinesHTML() {
     if (!ed.lines.length) return '<div class="empty">لم تتم إضافة منتجات بعد</div>';
@@ -888,6 +920,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     if (lines) $('#edLines').innerHTML = edLinesHTML();
     else ed.lines.forEach((l, i) => { const el = document.getElementById('lt' + i); if (el) el.textContent = money(l.qty * l.price); });
     $('#edTotals').innerHTML = edTotalsHTML();
+    const ri = $('#edRangeInfo'); if (ri) ri.innerHTML = edRangeInfo();
   }
   function edAdd(p) {
     const ex = ed.lines.find(l => l.productId === p.id);
@@ -916,6 +949,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   let pickerDraw = null;
   async function edSave() {
     const isSale = ed.kind === 'sale';
+    if (isSale && (ed.rangeFrom || ed.rangeTo) && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeFrom) && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeTo) && !rangeCount(ed.rangeFrom, ed.rangeTo)) return toast('رقم «إلى» لازم يكون أكبر من «من»');
     const lines = ed.lines.filter(l => l.qty > 0);
     if (!lines.length) return toast('أضف منتجاً واحداً على الأقل');
     if (ed.type === 'credit' && !ed.partyId) return toast(isSale ? 'اختر الزبون للبيع الآجل' : 'اختر المورد للشراء الآجل');
@@ -927,7 +961,8 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const doc = {
       id: uid(), no: ++db.seq[ed.kind], date: ed.date || today(), type: ed.type,
       items: lines.map(l => ({ productId: l.productId, name: l.name, qty: l.qty, price: Math.round(l.price), cost: isSale ? (byId(db.products, l.productId) || l).cost : Math.round(l.price) })),
-      discount: t.disc, total: t.total, paid: t.paid, accountPay: t.extra || 0, note: ed.note, createdAt: new Date().toISOString()
+      discount: t.disc, total: t.total, paid: t.paid, accountPay: t.extra || 0, note: ed.note, createdAt: new Date().toISOString(),
+      rangeFrom: isSale ? String(ed.rangeFrom || '').trim() : '', rangeTo: isSale ? String(ed.rangeTo || '').trim() : ''
     };
     // الدفعة على الحساب السابق تنحفظ كدفعة مربوطة بالفاتورة
     if (t.extra > 0) {
@@ -966,6 +1001,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <div class="kv"><span class="k">التاريخ</span><span class="v">${fmtDate(inv.date)}</span></div>
         <div class="kv"><span class="k">${isSale ? 'الزبون' : 'المورد'}</span><span class="v">${esc(party ? party.name : (isSale ? 'زبون نقدي' : '—'))}</span></div>
         <div class="kv"><span class="k">نوع الدفع</span><span class="v">${inv.type === 'credit' ? 'آجل' : 'نقدي'}</span></div>
+        ${rangeText(inv) ? `<div class="kv"><span class="k">أرقام الحسابات</span><span class="v" dir="rtl">${esc(rangeText(inv))}</span></div>` : ''}
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>المنتج</th><th class="n">الكمية</th><th class="n">السعر</th><th class="n">المبلغ</th></tr></thead>
@@ -1123,6 +1159,14 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         txt(num(l.price), TPL.price, y, { size: 20 });
         txt(num(l.qty * l.price), TPL.total, y, { bold: true, size: 20 });
       });
+      const rTxt = rangeText(inv);
+      let rangeInPanel = false;
+      if (rTxt && last) {
+        if (items.length < TPL.rows) {
+          const y = TPL.rowY0 + TPL.rowH * items.length;
+          txt('أرقام الحسابات: ' + rTxt, TPL.name[0], y, { align: 'right', bold: true, size: 19, color: '#0b3fa8', max: 840 });
+        } else rangeInPanel = true;
+      }
       if (chunks.length > 1) txt(`صفحة ${num(pi + 1)} من ${num(chunks.length)}`, 512, 1283, { size: 15, color: '#475569' });
       if (!last) { txt('يتبع…', TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 22 }); return c; }
       txt(money(inv.total), TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 25, color: '#0b3fa8' });
@@ -1131,6 +1175,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       const rows = [
         ['الزبون', cust ? cust.name : 'زبون نقدي'],
         ['نوع الفاتورة', inv.type === 'credit' ? 'آجل' : 'نقدي'],
+        rangeInPanel ? ['أرقام الحسابات', digits((inv.rangeFrom || '—') + ' - ' + (inv.rangeTo || '—'))] : null,
         inv.discount ? ['الخصم', money(inv.discount)] : null,
         ['الدفعة المستلمة', money(inv.paid)],
         ['المتبقي', money(rem), rem > 0 ? '#dc2626' : '#15803d'],
@@ -1279,6 +1324,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     return [db.settings.shopName, (isSale ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + num(inv.no) + ' — ' + fmtDate(inv.date),
       party ? (isSale ? 'الزبون: ' : 'المورد: ') + party.name : '', '',
       ...inv.items.map(l => `${l.name} × ${num(l.qty)} = ${money(l.qty * l.price)}`), '',
+      rangeText(inv) ? 'أرقام الحسابات: ' + rangeText(inv) : '',
       inv.discount ? 'الخصم: ' + money(inv.discount) : '',
       'الإجمالي: ' + money(inv.total), 'المدفوع: ' + money(inv.paid),
       inv.total - inv.paid > 0 ? 'المتبقي: ' + money(inv.total - inv.paid) : '',
@@ -2467,6 +2513,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         render();
       } else if (k === 'discount' || k === 'paid' || k === 'oldPay') edRefresh(false);
     },
+    edRange(k, v) { ed[k] = v.trim(); const el = $('#edRangeInfo'); if (el) el.innerHTML = edRangeInfo(); },
     edPayAll() {
       const bal = partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId);
       ed.oldPay = Math.max(0, Math.round(bal)); const el = $('#edOldPay'); if (el) el.value = fmtIn(ed.oldPay); edRefresh(false);
