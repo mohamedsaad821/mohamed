@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '3.0';
+  const APP_VERSION = '3.2';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -460,8 +460,13 @@
     const rs = (l.ranges || []).filter(r => r.from || r.to);
     return rs.map(r => '\u2066' + digits([r.from, r.to].filter(Boolean).join('-')) + '\u2069').join('، ');
   }
-  // البيان مع النطاقات: حساب ايكلود ( 1000-1500 )
-  const lineLabel = l => { const r = lineRangesText(l); return r ? l.name + ' ( ' + r + ' )' : l.name; };
+  // كل نطاق بقوس خاص: ( 1200 - 1300 )
+  const rangeParen = r => '( ' + digits([r.from, r.to].filter(Boolean).join(' - ')) + ' )';
+  const lineParens = l => (l.ranges || []).filter(r => r.from || r.to).map(rangeParen);
+  // داخل نص عربي: نثبت اتجاه الأرقام من اليسار لليمين حتى ما تنقلب (1300 - 1200)
+  const ltr = t => '\u202A' + t + '\u202C';
+  // للنص المكتوب: حساب ايكلود (1200 - 1300) (1450 - 1500)
+  const lineLabel = l => [l.name].concat(lineParens(l).map(ltr)).join('  ');
   const lineRangeCount = l => sum((l.ranges || []), r => rangeCount(r.from || '', r.to || ''));
   function allRanges(s) {
     const out = [];
@@ -683,7 +688,7 @@
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>المنتج</th><th class="n">الكمية</th><th class="n">السعر</th><th class="n">المبلغ</th></tr></thead>
-        <tbody>${inv.items.map(l => `<tr><td>${esc(l.name)}${lineRangesText(l) ? `<div class="small" style="color:var(--blue)" dir="rtl">( ${esc(lineRangesText(l))} )</div>` : ''}</td><td class="n">${num(l.qty)}</td><td class="n">${num(l.price)}</td><td class="n">${num(l.qty * l.price)}</td></tr>`).join('')}</tbody>
+        <tbody>${inv.items.map(l => `<tr><td>${esc(l.name)}${lineParens(l).map(t => `<div class="small" style="color:var(--blue)"><bdi dir="ltr">${esc(t)}</bdi></div>`).join('')}</td><td class="n">${num(l.qty)}</td><td class="n">${num(l.price)}</td><td class="n">${num(l.qty * l.price)}</td></tr>`).join('')}</tbody>
       </table></div>
       <div class="card">
         ${inv.discount ? `<div class="kv"><span class="k">المجموع</span><span class="v">${money(sub)}</span></div><div class="kv"><span class="k">الخصم</span><span class="v">${money(inv.discount)}</span></div>` : ''}
@@ -799,8 +804,13 @@
   function templatePages(inv, im) {
     const S = 1.5;
     const cust = byId(db.customers, inv.customerId);
-    const chunks = [];
-    for (let i = 0; i < Math.max(1, inv.items.length); i += TPL.rows) chunks.push(inv.items.slice(i, i + TPL.rows));
+    // كل منتج ياخذ سطر، وكل نطاق إضافي ياخذ سطر تحته؛ المنتج ما ينقسم بين صفحتين
+    const chunks = [[]]; let used = 0;
+    inv.items.forEach((l, idx) => {
+      const need = Math.min(TPL.rows, Math.max(1, lineParens(l).length));
+      if (used + need > TPL.rows && chunks[chunks.length - 1].length) { chunks.push([]); used = 0; }
+      chunks[chunks.length - 1].push({ l, idx, need }); used += need;
+    });
     return chunks.map((items, pi) => {
       const last = pi === chunks.length - 1;
       const c = document.createElement('canvas');
@@ -830,16 +840,38 @@
       cover(46, 1160, 238, 60, '#f6f9ff');
       txt(num(inv.no), TPL.no[0], TPL.no[1], { bold: true, size: 20 });
       txt(fmtDate(inv.date), TPL.date[0], TPL.date[1], { bold: true, size: 18 });
-      items.forEach((l, i) => {
-        const y = TPL.rowY0 + TPL.rowH * i;
-        // البيان مع النطاقات؛ يصغر الخط إذا النص طويل
-        const label = lineLabel(l);
+      // إذا منتج ياخذ أكثر من سطر، نغطي أرقام التسلسل المطبوعة ونكتب أرقامنا
+      const spans = items.some(it => it.need > 1);
+      if (spans) {
+        for (let r = 0; r < TPL.rows; r++) {
+          const ry = TPL.rowY0 + TPL.rowH * r;
+          let fill = '#f7f9fe';
+          try { const d = x.getImageData(Math.round(935 * S), Math.round((ry - 20) * S), 1, 1).data; fill = `rgb(${d[0]},${d[1]},${d[2]})`; } catch (e) { /* */ }
+          cover(930, ry - 17, 50, 34, fill);
+        }
+      }
+      let row = 0;
+      items.forEach(({ l, idx, need }) => {
+        const y = TPL.rowY0 + TPL.rowH * row;
+        const parens = lineParens(l);
+        const gap = '  ';
+        // حجم الخط حسب أطول سطر (الاسم + أول نطاق)
+        const first = parens.length ? l.name + gap + parens[0] : l.name;
         let fs = 20; x.font = `600 ${fs}px ${CFONT}`;
-        while (fs > 14 && x.measureText(label).width > TPL.name[1]) { fs--; x.font = `600 ${fs}px ${CFONT}`; }
-        txt(label, TPL.name[0], y, { align: 'right', max: TPL.name[1], size: fs });
+        while (fs > 14 && x.measureText(first).width > TPL.name[1]) { fs--; x.font = `600 ${fs}px ${CFONT}`; }
+        if (spans) txt(num(idx + 1), 955, y, { bold: true, size: 20, color: '#1d4ed8' });
+        x.font = `600 ${fs}px ${CFONT}`;
+        const nameW = Math.min(TPL.name[1] * 0.6, x.measureText(l.name).width);
+        txt(l.name, TPL.name[0], y, { align: 'right', max: TPL.name[1] * 0.6, size: fs });
+        // كل نطاق بقوس خاص، والنطاقات تحت بعض بنفس المحاذاة
+        const px = TPL.name[0] - nameW - x.measureText(gap).width;
+        x.save(); x.direction = 'ltr';
+        parens.slice(0, need).forEach((t, k) => txt(t, px, y + TPL.rowH * k, { align: 'right', size: fs, max: px - 550, color: '#0b3fa8' }));
+        x.restore();
         txt(num(l.qty), TPL.qty, y, { size: 20 });
         txt(num(l.price), TPL.price, y, { size: 20 });
         txt(num(l.qty * l.price), TPL.total, y, { bold: true, size: 20 });
+        row += need;
       });
       if (chunks.length > 1) txt(`صفحة ${num(pi + 1)} من ${num(chunks.length)}`, 512, 1283, { size: 15, color: '#475569' });
       if (!last) { txt('يتبع…', TPL.totalBox[0], TPL.totalBox[1], { bold: true, size: 22 }); return c; }
@@ -1149,7 +1181,7 @@
     const party = isSale ? byId(db.customers, inv.customerId) : byId(db.suppliers, inv.supplierId);
     return [db.settings.shopName, (isSale ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + num(inv.no) + ' — ' + fmtDate(inv.date),
       party ? (isSale ? 'الزبون: ' : 'المورد: ') + party.name : '', '',
-      ...inv.items.map(l => `${lineLabel(l).replace(/[\u2066\u2069]/g, '')} × ${num(l.qty)} = ${money(l.qty * l.price)}`), '',
+      ...inv.items.map(l => [`${l.name} × ${num(l.qty)} = ${money(l.qty * l.price)}`].concat(lineParens(l).map(t => '    ' + ltr(t))).join('\n')), '',
       rangeText(inv) ? 'أرقام الحسابات: ' + rangeText(inv) : '',
       inv.discount ? 'الخصم: ' + money(inv.discount) : '',
       'الإجمالي: ' + money(inv.total), 'المدفوع: ' + money(inv.paid),
