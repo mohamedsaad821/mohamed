@@ -297,6 +297,9 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .nh-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .name-chip { background: var(--bg); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; font-size: 13px; }
 .input.dup { border-color: var(--red); outline: 2px solid var(--red); outline-offset: -1px; }
+.line .ranges { grid-column: 1 / -1; border-top: 1px dashed var(--line); padding-top: 6px; display: grid; gap: 6px; }
+.range-row { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px; align-items: center; }
+.range-row .input { padding: 8px 10px; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {
@@ -347,7 +350,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.9';
+  const APP_VERSION = '3.0';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -747,7 +750,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const rem = s.total - s.paid;
     return `<div class="row" onclick="App.showInvoice('sale','${s.id}')">
       <div class="grow"><div class="t">${esc(c ? c.name : 'زبون نقدي')}</div>
-      <div class="s">فاتورة #${num(s.no)} · ${fmtDate(s.date)}${s.rangeFrom || s.rangeTo ? ' · حسابات ' + esc(digits((s.rangeFrom || '?') + '-' + (s.rangeTo || '?'))) : ''}</div></div>
+      <div class="s">فاتورة #${num(s.no)} · ${fmtDate(s.date)}${allRanges(s).length ? ' · حسابات ' + esc(digits(allRanges(s).map(r => [r.from, r.to].filter(Boolean).join('-')).join('، '))) : ''}</div></div>
       <div class="end"><div class="bold">${money(s.total)}</div>
       ${s.type === 'credit' ? (rem > 0 ? `<span class="badge b-amber">آجل · باقي ${money(rem)}</span>` : `<span class="badge b-green">آجل · مسدد</span>`) : `<span class="badge b-green">نقدي</span>`}</div></div>`;
   }
@@ -759,7 +762,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     if (q) list = list.filter(s => {
       const c = byId(db.customers, s.customerId);
       // البحث برقم حساب يلگى الفاتورة اللي النطاق مالها يشمله
-      const nq = toNum(q), inRange = /^\s*[\d٠-٩]+\s*$/.test(q) && rangeCount(s.rangeFrom || '', s.rangeTo || '') && nq >= toNum(s.rangeFrom) && nq <= toNum(s.rangeTo);
+      const nq = toNum(q), inRange = isNumStr(q) && allRanges(s).some(r => rangeCount(r.from || '', r.to || '') && nq >= toNum(r.from) && nq <= toNum(r.to));
       return String(s.no) === norm(q) || inRange || (c && matches(q, c.name, c.phone));
     });
     V(`
@@ -797,6 +800,21 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const a = toNum(from), b = toNum(to);
     if (!String(from).trim() || !String(to).trim() || !/^\s*[\d٠-٩]+\s*$/.test(from) || !/^\s*[\d٠-٩]+\s*$/.test(to) || b < a) return 0;
     return b - a + 1;
+  }
+  const isNumStr = v => /^\s*[\d٠-٩]+\s*$/.test(String(v || ''));
+  // نص النطاقات لسطر واحد: 1000-1500، 2000-2100
+  function lineRangesText(l) {
+    const rs = (l.ranges || []).filter(r => r.from || r.to);
+    return rs.map(r => '\u2066' + digits([r.from, r.to].filter(Boolean).join('-')) + '\u2069').join('، ');
+  }
+  // البيان مع النطاقات: حساب ايكلود ( 1000-1500 )
+  const lineLabel = l => { const r = lineRangesText(l); return r ? l.name + ' ( ' + r + ' )' : l.name; };
+  const lineRangeCount = l => sum((l.ranges || []), r => rangeCount(r.from || '', r.to || ''));
+  function allRanges(s) {
+    const out = [];
+    (s.items || []).forEach(l => (l.ranges || []).forEach(r => { if (r.from || r.to) out.push(r); }));
+    if (s.rangeFrom || s.rangeTo) out.push({ from: s.rangeFrom, to: s.rangeTo });
+    return out;
   }
   function rangeText(inv) {
     if (!inv.rangeFrom && !inv.rangeTo) return '';
@@ -843,14 +861,6 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       <div class="section-title">المنتجات</div>
       <div class="list" id="edLines">${edLinesHTML()}</div>
       <button class="btn secondary block" onclick="App.picker()">+ إضافة منتج</button>
-      ${kind === 'sale' ? `<div class="section-title">النطاقات (أرقام الحسابات)</div>
-      <div class="card">
-        <div class="grid2">
-          <label class="field" style="margin:0"><span>من رقم</span><input class="input" dir="ltr" inputmode="numeric" id="edRangeFrom" placeholder="مثلاً 1001" value="${esc(ed.rangeFrom)}" oninput="App.edRange('rangeFrom',this.value)"></label>
-          <label class="field" style="margin:0"><span>إلى رقم</span><input class="input" dir="ltr" inputmode="numeric" id="edRangeTo" placeholder="مثلاً 1050" value="${esc(ed.rangeTo)}" oninput="App.edRange('rangeTo',this.value)"></label>
-        </div>
-        <div class="small muted" id="edRangeInfo" style="margin-top:8px">${edRangeInfo()}</div>
-      </div>` : ''}
       <div class="card" style="margin-top:12px">
         <div class="grid2">
           <label class="field"><span>الخصم</span><input class="input money" inputmode="numeric" placeholder="0" value="${fmtIn(ed.discount)}" oninput="App.edField('discount',this.value)"></label>
@@ -885,13 +895,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     }
     return `<div class="card small muted">حساب ${isSale ? 'الزبون' : 'المورد'}: لا يوجد رصيد سابق.</div>`;
   }
-  function edRangeInfo() {
-    if (!ed.rangeFrom && !ed.rangeTo) return 'اختياري: اكتب أول وآخر رقم حساب، ويطلع بالفاتورة.';
-    const n = rangeCount(ed.rangeFrom, ed.rangeTo);
-    if (ed.rangeFrom && ed.rangeTo && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeFrom) && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeTo) && !n) return '<span class="neg">رقم «إلى» أصغر من رقم «من»</span>';
-    const qty = sum(ed.lines, l => l.qty);
-    return n ? `عدد الحسابات: <b>${num(n)}</b>${qty && qty !== n ? ` <span class="neg">(عدد القطع بالفاتورة ${num(qty)})</span>` : ''}` : '';
-  }
+  function edRangeInfo() { return ''; }
   function stockOf(pid) { const p = byId(db.products, pid); return p ? p.qty : 0; }
   function edLinesHTML() {
     if (!ed.lines.length) return '<div class="empty">لم تتم إضافة منتجات بعد</div>';
@@ -903,7 +907,27 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         <div class="stepper"><button onclick="App.edStep(${i},1)">+</button><input class="qty" inputmode="decimal" value="${l.qty}" oninput="App.edLine(${i},'qty',this.value)"><button onclick="App.edStep(${i},-1)">−</button></div>
         <input class="input price money" inputmode="numeric" value="${fmtIn(l.price)}" oninput="App.edLine(${i},'price',this.value)" aria-label="السعر">
         <b id="lt${i}">${money(l.qty * l.price)}</b>
-      </div></div>`).join('');
+      </div>
+      ${ed.kind === 'sale' ? `<div class="ranges">
+        ${(l.ranges || []).map((r, j) => `<div class="range-row">
+          <input class="input" dir="ltr" inputmode="numeric" placeholder="من" value="${esc(r.from)}" oninput="App.edRangeSet(${i},${j},'from',this.value)" id="rf${i}_${j}">
+          <span class="muted">—</span>
+          <input class="input" dir="ltr" inputmode="numeric" placeholder="إلى" value="${esc(r.to)}" oninput="App.edRangeSet(${i},${j},'to',this.value)">
+          <button class="x-btn" onclick="App.edRangeDel(${i},${j})" aria-label="حذف النطاق">×</button>
+        </div>`).join('')}
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <button class="link-btn" onclick="App.edRangeAdd(${i})">+ إضافة نطاق (أرقام الحسابات)</button>
+          <span class="small" id="ri${i}">${lineRangeInfo(l)}</span>
+        </div>
+      </div>` : ''}
+      </div>`).join('');
+  }
+  function lineRangeInfo(l) {
+    const rs = (l.ranges || []).filter(r => r.from || r.to);
+    if (!rs.length) return '';
+    if (rs.some(r => isNumStr(r.from) && isNumStr(r.to) && !rangeCount(r.from, r.to))) return '<span class="neg">«إلى» أصغر من «من»</span>';
+    const n = lineRangeCount(l);
+    return n ? `<span class="muted">عدد الحسابات: <b>${num(n)}</b></span>${n !== l.qty ? ` <span class="neg">(الكمية ${num(l.qty)})</span>` : ''}` : '';
   }
   function edTotalsHTML() {
     const t = edTotals();
@@ -920,7 +944,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     if (lines) $('#edLines').innerHTML = edLinesHTML();
     else ed.lines.forEach((l, i) => { const el = document.getElementById('lt' + i); if (el) el.textContent = money(l.qty * l.price); });
     $('#edTotals').innerHTML = edTotalsHTML();
-    const ri = $('#edRangeInfo'); if (ri) ri.innerHTML = edRangeInfo();
+    ed.lines.forEach((l, i) => { const el = document.getElementById('ri' + i); if (el) el.innerHTML = lineRangeInfo(l); });
   }
   function edAdd(p) {
     const ex = ed.lines.find(l => l.productId === p.id);
@@ -949,7 +973,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
   let pickerDraw = null;
   async function edSave() {
     const isSale = ed.kind === 'sale';
-    if (isSale && (ed.rangeFrom || ed.rangeTo) && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeFrom) && /^\s*[\d٠-٩]+\s*$/.test(ed.rangeTo) && !rangeCount(ed.rangeFrom, ed.rangeTo)) return toast('رقم «إلى» لازم يكون أكبر من «من»');
+    if (isSale && ed.lines.some(l => (l.ranges || []).some(r => isNumStr(r.from) && isNumStr(r.to) && !rangeCount(r.from, r.to)))) return toast('بالنطاقات: رقم «إلى» لازم يكون أكبر من «من»');
     const lines = ed.lines.filter(l => l.qty > 0);
     if (!lines.length) return toast('أضف منتجاً واحداً على الأقل');
     if (ed.type === 'credit' && !ed.partyId) return toast(isSale ? 'اختر الزبون للبيع الآجل' : 'اختر المورد للشراء الآجل');
@@ -960,9 +984,10 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const t = edTotals();
     const doc = {
       id: uid(), no: ++db.seq[ed.kind], date: ed.date || today(), type: ed.type,
-      items: lines.map(l => ({ productId: l.productId, name: l.name, qty: l.qty, price: Math.round(l.price), cost: isSale ? (byId(db.products, l.productId) || l).cost : Math.round(l.price) })),
+      items: lines.map(l => Object.assign({ productId: l.productId, name: l.name, qty: l.qty, price: Math.round(l.price), cost: isSale ? (byId(db.products, l.productId) || l).cost : Math.round(l.price) },
+        isSale && (l.ranges || []).some(r => r.from || r.to) ? { ranges: l.ranges.filter(r => r.from || r.to).map(r => ({ from: String(r.from || '').trim(), to: String(r.to || '').trim() })) } : {})),
       discount: t.disc, total: t.total, paid: t.paid, accountPay: t.extra || 0, note: ed.note, createdAt: new Date().toISOString(),
-      rangeFrom: isSale ? String(ed.rangeFrom || '').trim() : '', rangeTo: isSale ? String(ed.rangeTo || '').trim() : ''
+      rangeFrom: '', rangeTo: ''
     };
     // الدفعة على الحساب السابق تنحفظ كدفعة مربوطة بالفاتورة
     if (t.extra > 0) {
@@ -1005,7 +1030,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       </div>
       <div class="table-wrap"><table>
         <thead><tr><th>المنتج</th><th class="n">الكمية</th><th class="n">السعر</th><th class="n">المبلغ</th></tr></thead>
-        <tbody>${inv.items.map(l => `<tr><td>${esc(l.name)}</td><td class="n">${num(l.qty)}</td><td class="n">${num(l.price)}</td><td class="n">${num(l.qty * l.price)}</td></tr>`).join('')}</tbody>
+        <tbody>${inv.items.map(l => `<tr><td>${esc(l.name)}${lineRangesText(l) ? `<div class="small" style="color:var(--blue)" dir="rtl">( ${esc(lineRangesText(l))} )</div>` : ''}</td><td class="n">${num(l.qty)}</td><td class="n">${num(l.price)}</td><td class="n">${num(l.qty * l.price)}</td></tr>`).join('')}</tbody>
       </table></div>
       <div class="card">
         ${inv.discount ? `<div class="kv"><span class="k">المجموع</span><span class="v">${money(sub)}</span></div><div class="kv"><span class="k">الخصم</span><span class="v">${money(inv.discount)}</span></div>` : ''}
@@ -1154,7 +1179,11 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
       txt(fmtDate(inv.date), TPL.date[0], TPL.date[1], { bold: true, size: 18 });
       items.forEach((l, i) => {
         const y = TPL.rowY0 + TPL.rowH * i;
-        txt(l.name, TPL.name[0], y, { align: 'right', max: TPL.name[1], size: 20 });
+        // البيان مع النطاقات؛ يصغر الخط إذا النص طويل
+        const label = lineLabel(l);
+        let fs = 20; x.font = `600 ${fs}px ${CFONT}`;
+        while (fs > 14 && x.measureText(label).width > TPL.name[1]) { fs--; x.font = `600 ${fs}px ${CFONT}`; }
+        txt(label, TPL.name[0], y, { align: 'right', max: TPL.name[1], size: fs });
         txt(num(l.qty), TPL.qty, y, { size: 20 });
         txt(num(l.price), TPL.price, y, { size: 20 });
         txt(num(l.qty * l.price), TPL.total, y, { bold: true, size: 20 });
@@ -1467,7 +1496,7 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
     const party = isSale ? byId(db.customers, inv.customerId) : byId(db.suppliers, inv.supplierId);
     return [db.settings.shopName, (isSale ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + num(inv.no) + ' — ' + fmtDate(inv.date),
       party ? (isSale ? 'الزبون: ' : 'المورد: ') + party.name : '', '',
-      ...inv.items.map(l => `${l.name} × ${num(l.qty)} = ${money(l.qty * l.price)}`), '',
+      ...inv.items.map(l => `${lineLabel(l).replace(/[\u2066\u2069]/g, '')} × ${num(l.qty)} = ${money(l.qty * l.price)}`), '',
       rangeText(inv) ? 'أرقام الحسابات: ' + rangeText(inv) : '',
       inv.discount ? 'الخصم: ' + money(inv.discount) : '',
       'الإجمالي: ' + money(inv.total), 'المدفوع: ' + money(inv.paid),
@@ -2663,7 +2692,12 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
         render();
       } else if (k === 'discount' || k === 'paid' || k === 'oldPay') edRefresh(false);
     },
-    edRange(k, v) { ed[k] = v.trim(); const el = $('#edRangeInfo'); if (el) el.innerHTML = edRangeInfo(); },
+    edRangeAdd(i) {
+      const l = ed.lines[i]; l.ranges = l.ranges || []; l.ranges.push({ from: '', to: '' });
+      edRefresh(true); setTimeout(() => { const el = document.getElementById('rf' + i + '_' + (l.ranges.length - 1)); if (el) el.focus(); }, 30);
+    },
+    edRangeSet(i, j, k, v) { ed.lines[i].ranges[j][k] = v.trim(); const el = document.getElementById('ri' + i); if (el) el.innerHTML = lineRangeInfo(ed.lines[i]); },
+    edRangeDel(i, j) { ed.lines[i].ranges.splice(j, 1); edRefresh(true); },
     edPayAll() {
       const bal = partyBalance(ed.kind === 'sale' ? 'customer' : 'supplier', ed.partyId);
       ed.oldPay = Math.max(0, Math.round(bal)); const el = $('#edOldPay'); if (el) el.value = fmtIn(ed.oldPay); edRefresh(false);

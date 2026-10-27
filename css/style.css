@@ -284,6 +284,9 @@ tfoot td { font-weight: 800; border-top: 2px solid var(--line); }
 .nh-list { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .name-chip { background: var(--bg); border: 1px solid var(--line); border-radius: 99px; padding: 3px 10px; font-size: 13px; }
 .input.dup { border-color: var(--red); outline: 2px solid var(--red); outline-offset: -1px; }
+.line .ranges { grid-column: 1 / -1; border-top: 1px dashed var(--line); padding-top: 6px; display: grid; gap: 6px; }
+.range-row { display: grid; grid-template-columns: 1fr auto 1fr auto; gap: 6px; align-items: center; }
+.range-row .input { padding: 8px 10px; }
 .embed .no-embed { display: none !important; }
 .print-area { display: none; }
 @media print {
