@@ -3,7 +3,7 @@
 'use strict';
 (function () {
   const KEY = 'hesabati-db-v1';
-  const APP_VERSION = '2.8';
+  const APP_VERSION = '2.9';
   const MONTHS = ['كانون الثاني', 'شباط', 'آذار', 'نيسان', 'أيار', 'حزيران', 'تموز', 'آب', 'أيلول', 'تشرين الأول', 'تشرين الثاني', 'كانون الأول'];
   const EXP_CATS = ['إيجار', 'كهرباء', 'مولدة', 'ماء', 'نقل وتوصيل', 'صيانة', 'إنترنت واتصالات', 'ضيافة', 'أخرى'];
   const UNITS = ['قطعة', 'كارتون', 'علبة', 'كغم', 'لتر', 'متر', 'درزن'];
@@ -16,7 +16,7 @@
       sales: [], purchases: [], expenses: [],
       payments: [], supplierPayments: [],
       employees: [], advances: [], payrolls: [], workLogs: [], withdrawals: [], incomes: [], assets: [],
-      seq: { sale: 0, purchase: 0 }
+      seq: { sale: 0, purchase: 0, receipt: 0 }
     };
   }
   function load() {
@@ -622,7 +622,7 @@
     };
     // الدفعة على الحساب السابق تنحفظ كدفعة مربوطة بالفاتورة
     if (t.extra > 0) {
-      (isSale ? db.payments : db.supplierPayments).push({ id: uid(), partyId: ed.partyId, amount: t.extra, date: doc.date, note: 'دفعة مع فاتورة #' + doc.no, invoiceId: doc.id, createdAt: doc.createdAt });
+      (isSale ? db.payments : db.supplierPayments).push(Object.assign({ id: uid(), partyId: ed.partyId, amount: t.extra, date: doc.date, method: 'نقدي', note: 'دفعة مع فاتورة #' + doc.no, invoiceId: doc.id, createdAt: doc.createdAt }, isSale ? { no: ++db.seq.receipt } : {}));
     }
     if (isSale) {
       doc.customerId = ed.partyId;
@@ -925,6 +925,157 @@
     });
   }
 
+  /* ---------- وصل القبض (على تصميم المحل) ---------- */
+  // مواضع الحقول على صورة الوصل (1536×1024)
+  const RC = {
+    w: 1536, h: 1024,
+    no: [1165, 331], date: [1165, 386], name: [300, 331], method: [300, 386],
+    rowY0: 516, rowH: 46.4, desc: [1370, 620], amount: 564, notes: [227, 330],
+    pay: [968, 786], rem: [968, 850], total: [625, 846]
+  };
+  const PAY_METHODS = ['نقدي', 'تحويل بنكي', 'زين كاش', 'آسيا حوالة', 'ماستر كارد', 'أخرى'];
+  let rcP = null;
+  function loadReceiptTpl() {
+    if (!rcP) rcP = new Promise((res, rej) => {
+      const im = new Image();
+      im.onload = () => res(im);
+      im.onerror = () => { rcP = null; rej(new Error('receipt template')); };
+      im.src = window.RECEIPT_TEMPLATE || 'img/receipt-template.jpg';
+    });
+    return rcP;
+  }
+  function ensureReceiptNo(p) {
+    if (!p.no) { p.no = ++db.seq.receipt; saveLocal(); }
+    return p.no;
+  }
+  // رصيد الزبون لحظة الدفعة (كل الحركات اللي قبلها، والدفعة نفسها)
+  function balanceAtPayment(p) {
+    const key = x => (x.date || '') + '|' + (x.createdAt || '');
+    const k = key(p);
+    const c = byId(db.customers, p.partyId);
+    const sales = db.sales.filter(x => x.customerId === p.partyId && key(x) <= k);
+    const pays = db.payments.filter(x => x.partyId === p.partyId && (key(x) < k || x === p || (key(x) === k && db.payments.indexOf(x) <= db.payments.indexOf(p))));
+    const after = (c ? Number(c.opening) || 0 : 0) + sum(sales, x => x.total - x.paid) - sum(pays, x => x.amount);
+    return { before: after + p.amount, after };
+  }
+  const rcBal = b => !Math.round(b) ? 'مسدد' : b > 0 ? money(b) : 'لكم ' + money(-b);
+  function receiptHTML(p) {
+    const c = byId(db.customers, p.partyId);
+    const { before, after } = balanceAtPayment(p);
+    return `<div style="text-align:center;margin-bottom:10px"><h2 style="margin:0">وصل قبض</h2><div class="small muted">${esc(db.settings.shopName)}</div></div>
+      <div class="card">
+        <div class="kv"><span class="k">رقم الوصل</span><span class="v">#${num(ensureReceiptNo(p))}</span></div>
+        <div class="kv"><span class="k">التاريخ</span><span class="v">${fmtDate(p.date)}</span></div>
+        <div class="kv"><span class="k">اسم العميل</span><span class="v">${esc(c ? c.name : '—')}</span></div>
+        <div class="kv"><span class="k">طريقة الدفع</span><span class="v">${esc(p.method || 'نقدي')}</span></div>
+        ${p.note ? `<div class="kv"><span class="k">ملاحظة</span><span class="v">${esc(p.note)}</span></div>` : ''}
+      </div>
+      <div class="card">
+        <div class="kv"><span class="k">الرصيد السابق</span><span class="v">${rcBal(before)}</span></div>
+        <div class="kv total"><span class="k">الدفعة</span><span class="v pos">${money(p.amount)}</span></div>
+        <div class="kv"><span class="k">المتبقي</span><span class="v ${after > 0 ? 'neg' : 'pos'}">${rcBal(after)}</span></div>
+      </div>`;
+  }
+  function receiptCanvas(p, im) {
+    const S = 1.5;
+    const c = document.createElement('canvas');
+    c.width = RC.w * S; c.height = RC.h * S;
+    const x = c.getContext('2d');
+    x.scale(S, S);
+    x.drawImage(im, 0, 0, RC.w, RC.h);
+    x.textBaseline = 'middle'; x.direction = 'rtl';
+    const txt = (t, X, Y, o = {}) => {
+      x.font = `${o.bold ? '700' : '600'} ${o.size || 22}px ${CFONT}`;
+      x.fillStyle = o.color || '#0b2a6b';
+      x.textAlign = o.align || 'center';
+      let str = String(t);
+      if (o.max && x.measureText(str).width > o.max) {
+        while (str.length > 1 && x.measureText(str + '…').width > o.max) str = str.slice(0, -1);
+        str += '…';
+      }
+      x.fillText(str, X, Y);
+    };
+    // تغطية النقاط المطبوعة تحت القيم
+    // لون الغطاء يُؤخذ من خلفية التصميم نفسها حتى ما يبين
+    const bgAt = (px, py) => { try { const d = x.getImageData(Math.round(px * S), Math.round(py * S), 1, 1).data; return `rgb(${d[0]},${d[1]},${d[2]})`; } catch (e) { return null; } };
+    const cover = (cx, cy, cw, ch, fill) => { x.save(); x.fillStyle = bgAt(cx + cw / 2, cy + 2) || fill; x.beginPath(); if (x.roundRect) x.roundRect(cx, cy, cw, ch, 8); else x.rect(cx, cy, cw, ch); x.fill(); x.restore(); };
+    [[990, 318], [990, 373]].forEach(([cx, cy]) => cover(cx, cy, 350, 30, '#fbfcff'));
+    [[74, 318], [74, 373]].forEach(([cx, cy]) => cover(cx, cy, 452, 30, '#fbfcff'));
+    cover(868, 772, 204, 30, '#ffffff'); cover(868, 836, 204, 30, '#ffffff'); cover(472, 828, 302, 34, '#ffffff');
+
+    const cust = byId(db.customers, p.partyId);
+    const { before, after } = balanceAtPayment(p);
+    txt('#' + num(ensureReceiptNo(p)), RC.no[0], RC.no[1], { bold: true, size: 24 });
+    txt(fmtDate(p.date), RC.date[0], RC.date[1], { bold: true, size: 22 });
+    txt(cust ? cust.name : '—', RC.name[0], RC.name[1], { bold: true, size: 24, max: 440 });
+    txt(p.method || 'نقدي', RC.method[0], RC.method[1], { bold: true, size: 22 });
+    const full = Math.round(after) <= 0 && before > 0;
+    const rows = [
+      ['الرصيد السابق', rcBal(before), ''],
+      [full ? 'تسديد كامل الحساب' : 'دفعة على الحساب', money(p.amount), p.note || '']
+    ];
+    rows.forEach(([d, a, n], i) => {
+      const y = RC.rowY0 + RC.rowH * i;
+      txt(d, RC.desc[0], y, { align: 'right', size: 22, max: RC.desc[1], bold: i === 1 });
+      txt(a, RC.amount, y, { bold: true, size: 22, color: i === 1 ? '#15803d' : '#0b2a6b' });
+      if (n) txt(n, RC.notes[0], y, { size: 19, max: RC.notes[1] });
+    });
+    txt(money(p.amount), RC.pay[0], RC.pay[1], { bold: true, size: 22, color: '#15803d' });
+    txt(rcBal(after), RC.rem[0], RC.rem[1], { bold: true, size: 22, color: after > 0 ? '#dc2626' : '#15803d' });
+    txt(rcBal(before), RC.total[0], RC.total[1], { bold: true, size: 26, color: '#0b3fa8' });
+    return c;
+  }
+  async function receiptImageBlob(p) {
+    const im = await loadReceiptTpl();
+    const c = receiptCanvas(p, im);
+    return new Promise((res, rej) => c.toBlob(b => b ? res(b) : rej(new Error('blob')), 'image/png'));
+  }
+  async function receiptPDF(p) {
+    if (pdfBusy) return;
+    pdfBusy = true; toast('جاري تجهيز الوصل…');
+    try {
+      let im;
+      try { [, im] = await Promise.all([loadJsPDF(), loadReceiptTpl()]); }
+      catch (e) { return ask('تعذر تجهيز ملف PDF. تأكد من اتصال الإنترنت وحاول مرة أخرى.', { cancel: false }); }
+      const W = RC.w * 0.75, H = RC.h * 0.75;
+      const pdf = new window.jspdf.jsPDF({ unit: 'pt', format: [W, H], orientation: 'landscape' });
+      pdf.addImage(receiptCanvas(p, im).toDataURL('image/jpeg', 0.9), 'JPEG', 0, 0, W, H);
+      await deliverFile(pdf.output('blob'), 'وصل-قبض-' + ensureReceiptNo(p) + '.pdf', 'وصل قبض #' + p.no);
+    } catch (e) {
+      console.error(e); ask('حدث خطأ أثناء تجهيز الوصل. حاول مرة أخرى.', { cancel: false });
+    } finally { pdfBusy = false; }
+  }
+  function showReceipt(pid) {
+    const p = byId(db.payments, pid); if (!p) return;
+    const c = byId(db.customers, p.partyId);
+    openSheet('وصل قبض #' + num(ensureReceiptNo(p)), `
+      ${receiptHTML(p)}
+      <div class="btn-row"><button class="btn secondary" onclick="App.receiptPDF('${p.id}')">PDF</button></div>
+      ${c && waNumber(c.phone) ? `<div class="btn-row"><button class="btn wa-btn" onclick="App.waReceipt('${p.id}')">إرسال صورة الوصل على واتساب ${esc(c.name)}</button></div>` : ''}
+      <div class="btn-row"><button class="btn danger" onclick="App.deletePayment('customer','${p.id}')">حذف الدفعة</button></div>
+    `);
+  }
+  // نسخ صورة الوصل ثم فتح محادثة الزبون؛ يلصقها ويضغط إرسال
+  function waReceipt(p) {
+    const cust = byId(db.customers, p.partyId);
+    if (!cust || !waNumber(cust.phone)) return ask('أضف رقم واتساب للزبون أولاً من صفحة العملاء.', { cancel: false });
+    const link = 'https://wa.me/' + waNumber(cust.phone);
+    const blobP = receiptImageBlob(p);
+    let copied;
+    try {
+      if (!navigator.clipboard || !window.ClipboardItem) throw new Error('no clipboard');
+      copied = navigator.clipboard.write([new ClipboardItem({ 'image/png': blobP })]);
+    } catch (e) { copied = Promise.reject(e); }
+    toast('جاري تجهيز الصورة…');
+    const btn = `<a class="btn block wa-btn dlg-close" href="${esc(link)}" target="_blank" rel="noopener">فتح واتساب ${esc(cust.name)}</a>`;
+    copied.then(() => {
+      ask(`تم نسخ صورة الوصل ✓\n\n١. اضغط «فتح واتساب ${cust.name}».\n٢. اضغط مطولاً على خانة الكتابة واختر «لصق».\n٣. اضغط «إرسال».`, { cancel: false, ok: 'إغلاق', html: btn });
+    }).catch(async () => {
+      try { await deliverFile(await blobP, 'وصل-قبض-' + ensureReceiptNo(p) + '.png', 'وصل قبض #' + p.no); } catch (e) { /* */ }
+      ask(`احفظ الصورة أو شاركها، ثم افتح محادثة ${cust.name} وأرفقها واضغط «إرسال».`, { cancel: false, ok: 'إغلاق', html: btn });
+    });
+  }
+
   /* ---------- واتساب ---------- */
   function waNumber(phone) {
     let d = String(phone || '').replace(/[٠-٩]/g, ch => AR.indexOf(ch)).replace(/\D/g, '');
@@ -1153,7 +1304,7 @@
     const bal = partyBalance(kind, id);
     const rows = [
       ...invs.map(s => ({ date: s.date, ts: s.createdAt || '', html: `<div class="row" onclick="App.showInvoice('${P.invKind}','${s.id}')"><div class="grow"><div class="t">${s.items.length ? (kind === 'customer' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + num(s.no) : esc(s.note || 'رصيد افتتاحي')}</div><div class="s">${fmtDate(s.date)} · ${s.type === 'credit' ? 'آجل' : 'نقدي'}</div></div><div class="end"><div>${money(s.total)}</div>${s.total - s.paid > 0 ? `<div class="small muted">على الحساب ${money(s.total - s.paid)}</div>` : ''}</div></div>` })),
-      ...pays.map(p => ({ date: p.date, ts: p.createdAt || '', html: `<div class="row" onclick="App.deletePayment('${kind}','${p.id}')"><div class="grow"><div class="t pos">${kind === 'customer' ? 'دفعة مقبوضة' : 'دفعة مسددة'}</div><div class="s">${fmtDate(p.date)}${p.note ? ' · ' + esc(p.note) : ''}</div></div><div class="end pos bold">${money(p.amount)}</div></div>` }))
+      ...pays.map(p => ({ date: p.date, ts: p.createdAt || '', html: `<div class="row" onclick="${kind === 'customer' ? `App.showReceipt('${p.id}')` : `App.deletePayment('${kind}','${p.id}')`}"><div class="grow"><div class="t pos">${kind === 'customer' ? 'دفعة مقبوضة' + (p.no ? ' · وصل #' + num(p.no) : '') : 'دفعة مسددة'}</div><div class="s">${fmtDate(p.date)}${p.note ? ' · ' + esc(p.note) : ''}</div></div><div class="end pos bold">${money(p.amount)}</div></div>` }))
     ].sort((a, b) => (b.date + b.ts).localeCompare(a.date + a.ts));
     const op = Number(c.opening) || 0;
     if (op) rows.push({ html: `<div class="row" onclick="App.partyForm('${kind}','${id}')"><div class="grow"><div class="t">رصيد افتتاحي</div><div class="s">${fmtDate(c.openingDate || c.createdAt)} · اضغط للتعديل</div></div><div class="end">${balBadge(kind, op)}</div></div>` });
@@ -1206,9 +1357,12 @@
         ${partyPickerHTML('payParty', kind, partyId, () => payHint(kind))}</div>
       <div class="card small" id="payHint"></div>
       <label class="field"><span>المبلغ *</span><input class="input money" inputmode="numeric" id="payAmt" placeholder="0"></label>
-      <label class="field"><span>التاريخ</span><input type="date" class="input" id="payDate" value="${today()}"></label>
+      <div class="grid2">
+        <label class="field"><span>التاريخ</span><input type="date" class="input" id="payDate" value="${today()}"></label>
+        <label class="field"><span>طريقة الدفع</span><select class="input" id="payMethod">${PAY_METHODS.map(m => `<option>${m}</option>`).join('')}</select></label>
+      </div>
       <label class="field"><span>ملاحظة</span><input class="input" id="payNote"></label>
-      <button class="btn block" onclick="App.savePayment('${kind}')">حفظ الدفعة</button>
+      <button class="btn block" onclick="App.savePayment('${kind}')">حفظ الدفعة${kind === 'customer' ? ' وإصدار وصل قبض' : ''}</button>
     `);
     payHint(kind);
     if (!partyId) setTimeout(() => { const el = $('#payPartyQ'); if (el) el.focus(); }, 250);
@@ -1224,9 +1378,12 @@
     if (amount <= 0) return toast('اكتب المبلغ');
     const partyId = val('payPartyVal');
     if (!partyId) return toast('اختر الاسم أولاً');
-    PARTY[kind].pay().push({ id: uid(), partyId, amount, date: val('payDate') || today(), note: val('payNote'), createdAt: new Date().toISOString() });
+    const rec = { id: uid(), partyId, amount, date: val('payDate') || today(), method: val('payMethod') || 'نقدي', note: val('payNote'), createdAt: new Date().toISOString() };
+    if (kind === 'customer') rec.no = ++db.seq.receipt;
+    PARTY[kind].pay().push(rec);
     save(); closeSheet(); toast('تم حفظ الدفعة'); render();
-    if (location.hash.slice(1) === PARTY[kind].route) setTimeout(() => showParty(kind, partyId), 50);
+    if (kind === 'customer') setTimeout(() => showReceipt(rec.id), 50);
+    else if (location.hash.slice(1) === PARTY[kind].route) setTimeout(() => showParty(kind, partyId), 50);
   }
   async function deletePayment(kind, pid) {
     const arr = PARTY[kind].pay(); const p = byId(arr, pid); if (!p) return;
@@ -2183,6 +2340,9 @@
       if (kind === 'sale' && db.settings.invoiceTemplate !== false) return saleInvoicePDF(inv);
       makePDF((kind === 'sale' ? 'فاتورة بيع' : 'فاتورة شراء') + ' #' + inv.no, invoiceHTML(kind, inv), (kind === 'sale' ? 'فاتورة-' : 'شراء-') + inv.no + '.pdf');
     },
+    showReceipt,
+    receiptPDF(id) { const p = byId(db.payments, id); if (p) receiptPDF(p); },
+    waReceipt(id) { const p = byId(db.payments, id); if (p) waReceipt(p); },
     invoiceImage(id) { const inv = byId(db.sales, id); if (inv) saleInvoiceImage(inv); },
     waImage(id) { const inv = byId(db.sales, id); if (inv) waInvoiceImage(inv); },
     payslipPDF(id) {
